@@ -20,6 +20,7 @@ claude -p / codex exec / gemini -p / hermes chat -q / kimi --print / opencode -p
 
 - **7 大 CLI 工具**，通过 `@` 前缀随时切换
 - **最高权限默认开启**
+- **文件传输**：发送/接收图片、文件、视频（自动解密微信 CDN 媒体）
 - **AskUserQuestion**：Claude Code 的交互式提问转发到微信（Agent SDK）
 - **会话续接**：连续对话自动保持上下文
 - **`/resume`**：浏览所有历史会话，选编号恢复（类似终端的 `/resume`）
@@ -27,6 +28,7 @@ claude -p / codex exec / gemini -p / hermes chat -q / kimi --print / opencode -p
 - **工具接力**：`>>` 传递上条结果，`@tool1>tool2` 链式调用
 - **40+ `/` 命令**覆盖所有 CLI 核心 flag
 - **微信引用消息智能路由**：回复哪条消息就由哪个工具接手
+- **流式中间消息**：AI 执行过程中的进度实时推送到微信
 
 ## 安装
 
@@ -87,6 +89,25 @@ openclaw onboard  # OpenClaw 设置向导
 
 切换后后续消息默认发给该工具。
 
+### 文件传输
+
+**发送文件到微信：**
+```
+/send /path/to/file.py     ← 发送本地文件到微信
+```
+
+**接收微信文件：**
+- 直接在微信发送图片、文件、视频给 ClawBot
+- 自动下载并解密（微信 CDN 加密）
+- 保存到工作目录的 `.wx-media/` 文件夹
+- AI 可以直接读取和处理
+
+**AI 主动发送文件：**
+```
+[SEND_FILE: /path/to/result.png]
+```
+AI 输出此标记时，文件会自动发送到微信。
+
 ### 工具接力
 
 ```
@@ -122,6 +143,28 @@ Claude Code 需要你做选择时，问题自动转发到微信：
 → Claude 继续执行
 ```
 
+### 查看 AI 思考过程
+
+```
+/thoughts                        ← 开启/关闭思考内容显示
+```
+
+开启后，AI 的推理过程会单独发送到微信：
+
+```
+🤔 THINKING:
+让我分析一下这个问题...
+首先需要考虑...
+```
+
+### 消息模式
+
+```
+/msgmode verbose                 ← 详细模式：显示所有工具调用
+/msgmode normal                  ← 正常模式
+/msgmode compact                 ← 精简模式：合并输出
+```
+
 ## 完整命令列表
 
 ### 设置
@@ -131,6 +174,8 @@ Claude Code 需要你做选择时，问题自动转发到微信：
 | `/status` | 查看所有配置 | 通用 |
 | `/model <名>` | 切模型 | 所有 |
 | `/mode <auto\|safe\|plan>` | 权限模式 | 所有 |
+| `/msgmode <verbose\|normal\|compact>` | 消息模式 | 通用 |
+| `/thoughts` | 显示/隐藏思考内容 | 通用 |
 | `/effort <low\|med\|high\|max>` | 思考深度 | Claude |
 | `/turns <数>` | 最大轮次 | Claude |
 | `/budget <$>` | API 预算 | Claude |
@@ -163,6 +208,7 @@ Claude Code 需要你做选择时，问题自动转发到微信：
 | `/files` | 目录结构 |
 | `/compact` | 压缩上下文 |
 | `/stats` | 使用统计 |
+| `/send <路径>` | 发送文件到微信 |
 
 ### 会话
 
@@ -190,7 +236,7 @@ Claude Code 需要你做选择时，问题自动转发到微信：
 
 | 模式 | Claude | Codex | Gemini | Hermes | Kimi | OpenClaw | OpenCode |
 |---|---|---|---|---|---|---|---|
-| `auto` | `--dangerously-skip-permissions` | `--yolo` | `--approval-mode yolo` | `--yolo` | `--print` (自带) | `--local` | `-p` (自带) |
+| `auto` | `--dangerously-skip-permissions` | `--yolo` | `--approval-mode yolo` | `--yolo` | `--print` (自带) | `--local` | `--dangerously-skip-permissions` |
 | `safe` | 默认权限 | `--full-auto` | `--approval-mode default` | 默认 | 默认 | 默认 | — |
 | `plan` | `--permission-mode plan` | `--sandbox read-only` | `--approval-mode plan` | — | — | — | — |
 
@@ -219,24 +265,39 @@ src/
 ├── ilink/                # 微信 iLink Bot API
 │   ├── types.ts          # 协议类型
 │   ├── auth.ts           # QR 扫码登录
-│   └── client.ts         # 长轮询 + 发消息 + typing
+│   └── client.ts         # 长轮询 + 发消息 + typing + 发送队列
 ├── adapters/             # CLI 工具适配器
 │   ├── base.ts           # 接口 + 共享 helpers (跨平台 spawn)
-│   ├── claude.ts         # Agent SDK + CLI 降级
-│   ├── codex.ts          # codex exec + stdin 传参
-│   ├── gemini.ts         # gemini -p + stdin 传参
-│   ├── hermes.ts         # hermes chat -q -Q
-│   ├── kimi.ts           # kimi --print + --thinking
-│   ├── openclaw.ts       # openclaw agent --message --local
-│   ├── opencode.ts       # opencode run --format json
+│   ├── claude.ts         # Agent SDK + CLI 降级 + 流式消息
+│   ├── codex.ts          # codex exec + stdin 传参 + 媒体支持
+│   ├── gemini.ts         # gemini -p + stdin 传参 + 媒体支持
+│   ├── hermes.ts         # hermes chat -q -Q + 媒体支持
+│   ├── kimi.ts           # kimi --print + --thinking + 媒体支持
+│   ├── openclaw.ts       # openclaw agent --message --local + 媒体支持
+│   ├── opencode.ts       # opencode run --format json + thinking
 │   └── registry.ts       # 自动检测已安装工具
+├── utils/
+│   ├── logger.ts         # 日志
+│   ├── crypto.ts         # AES 加解密
+│   └── media.ts          # 媒体下载/解密/格式检测
 └── bridge/               # 桥接逻辑
     ├── session.ts        # 会话持久化
     ├── formatter.ts      # 响应格式化
     └── router.ts         # @ 路由 + / 命令 + >> 接力 + 链式调用
                           # + /resume 历史会话浏览
                           # + AskUserQuestion 微信转发
+                          # + /msgmode /thoughts 命令
+                          # + 文件发送/接收路由
 ```
+
+## 支持的媒体格式
+
+自动解密微信 CDN 加密的媒体文件：
+
+- **图片**: JPEG, PNG, GIF, WEBP, BMP
+- **文档**: PDF, ZIP
+- **音视频**: MP4, MP3, SILK (微信语音)
+- **其他**: OLE (Office 文档)
 
 ## 微信 iLink Bot API
 
@@ -247,6 +308,12 @@ src/
 - 收消息：HTTP 长轮询 (35s)
 - 发消息：POST + context_token
 - **官方通道，不封号**
+
+## 致谢
+
+- [sgaofen/cli-in-wechat](https://github.com/sgaofen/cli-in-wechat) - 原项目
+- [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) - Hermes Agent
+- [anomalyco/openclaw](https://github.com/anomalyco/openclaw) - OpenClaw
 
 ## License
 
