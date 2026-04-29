@@ -1,7 +1,34 @@
 import { log } from '../utils/logger.js';
 import type { CLIAdapter, ExecOptions, ExecResult, AdapterCapabilities } from './base.js';
 import { commandExists, spawnProc, setupAbort, setupTimeout, stripAnsi } from './base.js';
+import type { DownloadedMedia } from '../utils/media.js';
+import { copyMediaToWorkDir } from '../utils/media.js';
 import { randomUUID } from 'node:crypto';
+
+function buildMediaPrompt(prompt: string, media?: DownloadedMedia[], workDir?: string): string {
+  if (!media || media.length === 0) return prompt;
+  
+  const copiedMedia = workDir ? media.map(m => copyMediaToWorkDir(m, workDir)) : media;
+  
+  const fileList = copiedMedia.map(m => {
+    const relativePath = workDir && m.path.startsWith(workDir) 
+      ? m.path.slice(workDir.length).replace(/^[\/\\]/, '')
+      : m.path;
+    const typeNames: Record<string, string> = { image: '图片', file: '文件', video: '视频' };
+    const sizeStr = m.size ? `${(m.size / 1024).toFixed(1)}KB` : '未知大小';
+    return `- ${m.fileName}\n  类型: ${typeNames[m.type] || '文件'}\n  大小: ${sizeStr}\n  路径: ${relativePath}`;
+  }).join('\n\n');
+  
+  const userPrompt = prompt.trim() && !prompt.startsWith('[文件:') && !prompt.startsWith('[图片:') && !prompt.startsWith('[视频:')
+    ? `\n\n用户说：${prompt}`
+    : '';
+  
+  return `已接收到用户通过微信发送的文件：
+
+${fileList}
+
+文件已保存到工作目录。请勿主动读取或处理这些文件，等待用户明确指示需要做什么。${userPrompt}`;
+}
 
 function extractOpenClawContent(text: string): string {
   const lines = text.split('\n');
@@ -12,7 +39,6 @@ function extractOpenClawContent(text: string): string {
     const stripped = stripAnsi(line);
     const l = stripped.trim();
 
-    // Skip plugin/logs
     if (l.startsWith('[plugins]')) continue;
     if (l.startsWith('[mnemo]')) continue;
     if (l.startsWith('[agent/')) continue;
@@ -34,7 +60,6 @@ function extractOpenClawContent(text: string): string {
     if (l.includes('session file locked')) continue;
     if (!l) continue;
 
-    // This looks like content
     inContent = true;
     contentLines.push(stripped);
   }
@@ -64,7 +89,9 @@ export class OpenClawAdapter implements CLIAdapter {
   execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       const { settings } = opts;
-      const args = ['agent', '--message', prompt, '--local'];
+      const workDir = settings.workDir || opts.workDir;
+      const fullPrompt = buildMediaPrompt(prompt, opts.media, workDir);
+      const args = ['agent', '--message', fullPrompt, '--local'];
 
       if (settings.model) {
         args.push('--model', settings.model);
@@ -74,7 +101,6 @@ export class OpenClawAdapter implements CLIAdapter {
       if (sessionId) {
         args.push('--session-id', sessionId);
       } else {
-        // Generate unique session to avoid lock conflicts
         args.push('--session-id', `wx-${randomUUID().slice(0, 8)}`);
       }
 
@@ -83,7 +109,7 @@ export class OpenClawAdapter implements CLIAdapter {
       log.debug(`[openclaw] executing`);
 
       const proc = spawnProc(this.command, args, {
-        cwd: settings.workDir || opts.workDir,
+        cwd: workDir,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env },
       });
@@ -106,7 +132,6 @@ export class OpenClawAdapter implements CLIAdapter {
         const stdoutText = stripAnsi(stdout.trim());
         const stderrText = stripAnsi(stderr.trim());
 
-        // Try JSON first
         const jsonLines = stdoutText.split('\n').filter(l => l.trim().startsWith('{'));
         for (const line of jsonLines) {
           try {
@@ -123,7 +148,6 @@ export class OpenClawAdapter implements CLIAdapter {
           } catch { continue; }
         }
 
-        // Extract content from logs
         const content = extractOpenClawContent(stdoutText || stderrText);
         const sessionMatch = stdoutText.match(/sessionID[":\s]+([a-f0-9-]{8,})/i) ||
                              stdoutText.match(/session[-_]?id[":\s]+([a-f0-9-]{8,})/i);

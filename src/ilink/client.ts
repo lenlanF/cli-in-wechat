@@ -1,7 +1,10 @@
-import { randomUUID } from 'node:crypto';
-import { generateWechatUin } from '../utils/crypto.js';
+import { randomUUID, randomBytes } from 'node:crypto';
+import { readFileSync, existsSync, statSync } from 'node:fs';
+import { basename } from 'node:path';
+import { generateWechatUin, encryptAesEcb, aesEcbPaddedSize, encodeMessageAesKey, md5 } from '../utils/crypto.js';
 import { log } from '../utils/logger.js';
 import { savePollCursor, loadPollCursor, saveContextTokens } from '../config.js';
+import { downloadImage, downloadFile, downloadVideo, type DownloadedMedia } from '../utils/media.js';
 import type {
   Credentials,
   WeixinMessage,
@@ -12,8 +15,31 @@ import type {
 
 const CHANNEL_VERSION = '1.0.2';
 const HTTP_TIMEOUT_MS = 45_000;
+const CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
+const REGULAR_RETRY_DELAYS_MS = [0, 30_000, 60_000, 120_000] as const;
+const INTERMEDIATE_RETRY_DELAYS_MS = [0, 12_000] as const;
+const BASE_RATE_LIMIT_COOLDOWN_MS = 150_000; // ~2.5 minutes
+const MAX_RATE_LIMIT_COOLDOWN_MS = 420_000; // ~7 minutes
 
-export type MessageHandler = (msg: WeixinMessage, text: string, refText: string) => void;
+// Upload media types
+const UPLOAD_MEDIA_TYPE_IMAGE = 1;
+const UPLOAD_MEDIA_TYPE_VIDEO = 2;
+const UPLOAD_MEDIA_TYPE_FILE = 3;
+
+type SendStreamType = 'regular' | 'intermediate';
+
+interface UserRateLimitState {
+  consecutiveRet2: number;
+  suppressIntermediateUntil: number;
+  blockAllSendsUntil: number;
+}
+
+export type MessageHandler = (
+  msg: WeixinMessage,
+  text: string,
+  refText: string,
+  media?: DownloadedMedia[]
+) => void;
 
 export class ILinkClient {
   private credentials: Credentials;
@@ -22,6 +48,8 @@ export class ILinkClient {
   private contextTokens = new Map<string, string>();
   private typingTickets = new Map<string, { ticket: string; ts: number }>();
   private handlers: MessageHandler[] = [];
+  private sendQueues = new Map<string, Promise<void>>();
+  private rateLimitStates = new Map<string, UserRateLimitState>();
   private backoffMs = 1000;
   private abortController: AbortController | null = null;
 
@@ -70,7 +98,7 @@ export class ILinkClient {
         this.backoffMs = 1000;
 
         for (const msg of msgs) {
-          this.processMessage(msg);
+          await this.processMessage(msg);
         }
       } catch (err: unknown) {
         if (!this.running) return;
@@ -138,7 +166,7 @@ export class ILinkClient {
 
   // ─── Message handling ──────────────────────────────────
 
-  private processMessage(msg: WeixinMessage): void {
+  private async processMessage(msg: WeixinMessage): Promise<void> {
     // Only process user messages, skip bot echoes
     if (msg.message_type !== 1) return;
 
@@ -147,14 +175,14 @@ export class ILinkClient {
     saveContextTokens(this.contextTokens);
 
     log.debug(`[msg] item_list=${JSON.stringify(msg.item_list)}`);
-    const { text, refText } = parseMessage(msg);
-    if (!text && !refText) return;
+    const { text, refText, mediaItems } = await parseMessage(msg);
+    if (!text && !refText && mediaItems.length === 0) return;
 
-    log.debug(`收到 [${msg.from_user_id.substring(0, 12)}...]: ${text.substring(0, 60)}`);
+    log.debug(`收到 [${msg.from_user_id.substring(0, 12)}...]: ${text.substring(0, 60)}${mediaItems.length > 0 ? ` (+${mediaItems.length} media)` : ''}`);
 
     for (const handler of this.handlers) {
       try {
-        handler(msg, text, refText);
+        handler(msg, text, refText, mediaItems.length > 0 ? mediaItems : undefined);
       } catch (err) {
         log.error('消息处理器异常:', err);
       }
@@ -167,23 +195,128 @@ export class ILinkClient {
 
   // ─── Sending ───────────────────────────────────────────
 
-  async sendText(userId: string, text: string): Promise<void> {
+  private enqueueSend(userId: string, task: () => Promise<void>): Promise<void> {
+    const prev = this.sendQueues.get(userId) || Promise.resolve();
+    const run = prev.then(task, task);
+    const tracked = run.catch(() => {});
+    this.sendQueues.set(userId, tracked);
+    return run.finally(() => {
+      if (this.sendQueues.get(userId) === tracked) {
+        this.sendQueues.delete(userId);
+      }
+    });
+  }
+
+  private getRateLimitState(userId: string): UserRateLimitState {
+    const state = this.rateLimitStates.get(userId) || {
+      consecutiveRet2: 0,
+      suppressIntermediateUntil: 0,
+      blockAllSendsUntil: 0,
+    };
+    this.rateLimitStates.set(userId, state);
+    return state;
+  }
+
+  private isRateLimitedError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg.includes('ret=-2');
+  }
+
+  private nextCooldownMs(consecutiveRet2: number): number {
+    // 2nd consecutive ret=-2 => 150s; then linear backoff up to ~7min.
+    const steps = Math.max(0, consecutiveRet2 - 2);
+    return Math.min(MAX_RATE_LIMIT_COOLDOWN_MS, BASE_RATE_LIMIT_COOLDOWN_MS + steps * 60_000);
+  }
+
+  private async gateSendWindow(userId: string, streamType: SendStreamType): Promise<boolean> {
+    const state = this.getRateLimitState(userId);
+    const now = Date.now();
+
+    if (streamType === 'intermediate' && now < state.suppressIntermediateUntil) {
+      log.debug(`[send] 跳过中间消息(保护模式): ${userId.substring(0, 12)}...`);
+      return false;
+    }
+
+    if (now < state.blockAllSendsUntil) {
+      if (streamType === 'intermediate') {
+        log.debug('[send] 中间消息命中全局发送冷却，直接跳过');
+        return false;
+      }
+      const waitMs = state.blockAllSendsUntil - now;
+      log.warn(`[send] 命中限流冷却窗口，延迟发送 ${Math.ceil(waitMs / 1000)}s`);
+      await sleep(waitMs);
+    }
+
+    return true;
+  }
+
+  async sendText(userId: string, text: string, options?: { streamType?: SendStreamType }): Promise<void> {
     const token = this.contextTokens.get(userId);
     if (!token) {
       log.error(`无法发送给 ${userId}: 缺少 context_token (用户必须先发一条消息)`);
       return;
     }
+    const streamType = options?.streamType || 'regular';
+    if (!(await this.gateSendWindow(userId, streamType))) {
+      return;
+    }    
 
-    const chunks = chunkText(text, 2000);
-    log.debug(`发送给 [${userId.substring(0, 12)}...] (${chunks.length} 块): ${text.substring(0, 100)}${text.length > 100 ? '…' : ''}`);
-    for (let i = 0; i < chunks.length; i++) {
-      await this.sendRawMessage(userId, token, [
-        { type: 1 as const, text_item: { text: chunks[i] } },
-      ]);
-      if (i < chunks.length - 1) {
-        await sleep(300); // preserve ordering between chunks
+    await this.enqueueSend(userId, async () => {
+      const chunks = chunkText(text, 2000);
+      log.debug(`发送给 [${userId.substring(0, 12)}...] (${chunks.length} 块): ${text.substring(0, 100)}${text.length > 100 ? '…' : ''}`);
+      for (let i = 0; i < chunks.length; i++) {
+        await this.sendRawMessageWithRetry(userId, token, [
+          { type: 1 as const, text_item: { text: chunks[i] } },
+        ], streamType);
+      }
+    });
+  }
+
+  private async sendRawMessageWithRetry(
+    userId: string,
+    contextToken: string,
+    itemList: MessageItem[],
+    streamType: SendStreamType = 'regular',
+  ): Promise<void> {
+    const state = this.getRateLimitState(userId);
+    let lastErr: unknown = null;
+    const retryDelays = streamType === 'regular'
+      ? REGULAR_RETRY_DELAYS_MS
+      : INTERMEDIATE_RETRY_DELAYS_MS;
+
+    for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+      const delay = retryDelays[attempt];
+      if (delay > 0) await sleep(delay);
+
+      if (!(await this.gateSendWindow(userId, streamType))) {
+        return;
+      }
+
+      try {
+        await this.sendRawMessage(userId, contextToken, itemList);
+        state.consecutiveRet2 = 0;
+        state.blockAllSendsUntil = 0;
+        return;
+      } catch (err) {
+        lastErr = err;
+        const isRateLimited = this.isRateLimitedError(err);
+
+        if (isRateLimited) {
+          state.consecutiveRet2 += 1;
+          const cooldownMs = this.nextCooldownMs(state.consecutiveRet2);
+          const until = Date.now() + cooldownMs;
+          state.blockAllSendsUntil = Math.max(state.blockAllSendsUntil, until);
+          state.suppressIntermediateUntil = Math.max(state.suppressIntermediateUntil, until);
+          log.warn(`[send] 命中限流 ret=-2，进入冷却 ${Math.round(cooldownMs / 1000)}s (连续${state.consecutiveRet2}次)`);
+        }
+
+        if (!isRateLimited || attempt === retryDelays.length - 1) {
+          throw err;
+        }
+        log.warn(`[send] ret=-2 延迟重试 (${attempt + 1}/${retryDelays.length - 1})`);
       }
     }
+    throw lastErr instanceof Error ? lastErr : new Error('发送消息失败');
   }
 
   private async sendRawMessage(
@@ -220,6 +353,181 @@ export class ILinkClient {
     if (data.ret !== undefined && data.ret !== 0) {
       throw new Error(`发送消息失败: ${data.errmsg || `ret=${data.ret}`}`);
     }
+  }
+
+  // ─── File/Image/Video Upload & Send ──────────────────────
+
+  async sendFile(userId: string, filePath: string, title?: string): Promise<void> {
+    const token = this.contextTokens.get(userId);
+    if (!token) {
+      log.error(`无法发送文件给 ${userId}: 缺少 context_token`);
+      return;
+    }
+
+    if (!existsSync(filePath)) {
+      throw new Error(`文件不存在: ${filePath}`);
+    }
+
+    const upload = await this.uploadToCdn(userId, filePath, UPLOAD_MEDIA_TYPE_FILE);
+    const fileName = title || basename(filePath);
+
+    await this.enqueueSend(userId, async () => {
+      await this.sendRawMessageWithRetry(userId, token, [
+        {
+          type: 4,
+          file_item: {
+            file_name: fileName,
+            len: String(upload.rawsize),
+            media: {
+              encrypt_query_param: upload.downloadParam,
+              aes_key: encodeMessageAesKey(upload.aeskey),
+              encrypt_type: 1,
+            },
+          },
+        },
+      ]);
+    });
+
+    log.info(`[sendFile] 已发送: ${fileName}`);
+  }
+
+  async sendImage(userId: string, imagePath: string, caption?: string): Promise<void> {
+    const token = this.contextTokens.get(userId);
+    if (!token) {
+      log.error(`无法发送图片给 ${userId}: 缺少 context_token`);
+      return;
+    }
+
+    if (!existsSync(imagePath)) {
+      throw new Error(`图片不存在: ${imagePath}`);
+    }
+
+    if (caption) {
+      await this.sendText(userId, caption);
+    }
+
+    const upload = await this.uploadToCdn(userId, imagePath, UPLOAD_MEDIA_TYPE_IMAGE);
+
+    await this.enqueueSend(userId, async () => {
+      await this.sendRawMessageWithRetry(userId, token, [
+        {
+          type: 2,
+          image_item: {
+            media: {
+              encrypt_query_param: upload.downloadParam,
+              aes_key: encodeMessageAesKey(upload.aeskey),
+              encrypt_type: 1,
+            },
+            mid_size: upload.filesize,
+          },
+        },
+      ]);
+    });
+
+    log.info(`[sendImage] 已发送图片: ${basename(imagePath)}`);
+  }
+
+  async sendVideo(userId: string, videoPath: string): Promise<void> {
+    const token = this.contextTokens.get(userId);
+    if (!token) {
+      log.error(`无法发送视频给 ${userId}: 缺少 context_token`);
+      return;
+    }
+
+    if (!existsSync(videoPath)) {
+      throw new Error(`视频不存在: ${videoPath}`);
+    }
+
+    const upload = await this.uploadToCdn(userId, videoPath, UPLOAD_MEDIA_TYPE_VIDEO);
+
+    await this.enqueueSend(userId, async () => {
+      await this.sendRawMessageWithRetry(userId, token, [
+        {
+          type: 5,
+          video_item: {
+            media: {
+              encrypt_query_param: upload.downloadParam,
+              aes_key: encodeMessageAesKey(upload.aeskey),
+              encrypt_type: 1,
+            },
+            video_size: upload.filesize,
+          },
+        },
+      ]);
+    });
+
+    log.info(`[sendVideo] 已发送视频: ${basename(videoPath)}`);
+  }
+
+  private async uploadToCdn(
+    userId: string,
+    filePath: string,
+    mediaType: number,
+  ): Promise<{ rawsize: number; filesize: number; aeskey: Buffer; downloadParam: string }> {
+    const plaintext = readFileSync(filePath);
+    const rawsize = plaintext.length;
+    const rawfilemd5 = md5(plaintext);
+    const filesize = aesEcbPaddedSize(rawsize);
+
+    const filekey = randomBytes(16).toString('hex');
+    const aeskey = randomBytes(16);
+
+    // Get upload URL from iLink
+    const uploadResp = await fetch(
+      `${this.credentials.baseUrl}/ilink/bot/getuploadurl`,
+      {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify({
+          filekey,
+          media_type: mediaType,
+          to_user_id: userId,
+          rawsize,
+          rawfilemd5,
+          filesize,
+          aeskey: aeskey.toString('hex'),
+          no_need_thumb: true,
+          base_info: this.baseInfo(),
+        }),
+      },
+    );
+
+    if (!uploadResp.ok) {
+      const body = await uploadResp.text().catch(() => '');
+      throw new Error(`获取上传URL失败: HTTP ${uploadResp.status} ${body}`);
+    }
+
+    const uploadData = (await uploadResp.json()) as { upload_param?: string };
+    const uploadParam = uploadData.upload_param;
+    if (!uploadParam) {
+      throw new Error('获取上传URL失败: 无 upload_param');
+    }
+
+    // Encrypt and upload to CDN
+    const ciphertext = encryptAesEcb(plaintext, aeskey);
+    const cdnUrl = `${CDN_BASE_URL}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`;
+
+    log.debug(`[upload] Uploading to CDN: ${rawsize} bytes`);
+
+    const cdnResp = await fetch(cdnUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(ciphertext),
+    });
+
+    if (!cdnResp.ok) {
+      const body = await cdnResp.text().catch(() => '');
+      throw new Error(`CDN 上传失败: HTTP ${cdnResp.status} ${body}`);
+    }
+
+    const downloadParam = cdnResp.headers.get('x-encrypted-param');
+    if (!downloadParam) {
+      throw new Error('CDN 上传失败: 无 x-encrypted-param');
+    }
+
+    log.debug(`[upload] CDN upload success, downloadParam: ${downloadParam.substring(0, 30)}...`);
+
+    return { rawsize, filesize, aeskey, downloadParam };
   }
 
   // ─── Typing indicator ─────────────────────────────────
@@ -301,14 +609,43 @@ export class ILinkClient {
 
 // ─── Helpers ───────────────────────────────────────────────
 
-function parseMessage(msg: WeixinMessage): { text: string; refText: string } {
+async function parseMessage(msg: WeixinMessage): Promise<{ text: string; refText: string; mediaItems: DownloadedMedia[] }> {
   const parts: string[] = [];
   let refText = '';
+  const mediaItems: DownloadedMedia[] = [];
+  
   for (const item of msg.item_list) {
     if (item.type === 1 && item.text_item?.text) {
       parts.push(item.text_item.text);
+    } else if (item.type === 2 && item.image_item) {
+      try {
+        const media = await downloadImage(item.image_item);
+        mediaItems.push(media);
+        parts.push(`[图片: ${media.fileName}]`);
+      } catch (err) {
+        log.error('[parseMessage] 下载图片失败:', err);
+        parts.push('[图片: 下载失败]');
+      }
     } else if (item.type === 3 && item.voice_item?.text) {
       parts.push(item.voice_item.text); // voice-to-text transcription
+    } else if (item.type === 4 && item.file_item) {
+      try {
+        const media = await downloadFile(item.file_item);
+        mediaItems.push(media);
+        parts.push(`[文件: ${media.fileName}]`);
+      } catch (err) {
+        log.error('[parseMessage] 下载文件失败:', err);
+        parts.push('[文件: 下载失败]');
+      }
+    } else if (item.type === 5 && item.video_item) {
+      try {
+        const media = await downloadVideo(item.video_item);
+        mediaItems.push(media);
+        parts.push(`[视频: ${media.fileName}]`);
+      } catch (err) {
+        log.error('[parseMessage] 下载视频失败:', err);
+        parts.push('[视频: 下载失败]');
+      }
     }
     // Extract quoted message content (WeChat 引用消息)
     const ref = item.ref_msg;
@@ -322,7 +659,7 @@ function parseMessage(msg: WeixinMessage): { text: string; refText: string } {
   }
   // WeChat embeds quoted content inline as "[引用]:\n<content>" — strip the prefix
   const text = parts.join('\n').trim().replace(/^\[引用\]:\n?/, '');
-  return { text, refText };
+  return { text, refText, mediaItems };
 }
 
 function chunkText(text: string, maxLen: number): string[] {

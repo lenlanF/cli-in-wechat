@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { execSync } from 'node:child_process';
 import { log } from '../utils/logger.js';
 import { ILinkClient } from '../ilink/client.js';
 import { AdapterRegistry } from '../adapters/registry.js';
@@ -8,7 +9,8 @@ import { SessionManager } from './session.js';
 import { formatResponse } from './formatter.js';
 import type { WeixinMessage } from '../ilink/types.js';
 import type { BridgeConfig } from '../config.js';
-import type { AskUserRequest } from '../adapters/base.js';
+import { DEFAULT_SETTINGS, type AskUserRequest, type MsgMode } from '../adapters/base.js';
+import type { DownloadedMedia } from '../utils/media.js';
 
 interface ActiveTask { abort: AbortController; tool: string }
 interface PendingQuestion { resolve: (answer: string) => void; timeout: ReturnType<typeof setTimeout>; toolName: string }
@@ -22,6 +24,10 @@ const TOOL_ALIASES: Record<string, string> = {
   openclaw: 'openclaw', claw: 'openclaw',
   opencode: 'opencode', oc: 'opencode',
 };
+
+const NORMAL_ACTIVITY_MAX_LINES_PER_MESSAGE = 12;
+const NORMAL_ACTIVITY_MAX_CHARS_PER_MESSAGE = 1400;
+const NORMAL_ACTIVITY_SPLIT_DELAY_MS = 5000;
 
 export class Router {
   private ilink: ILinkClient;
@@ -41,8 +47,8 @@ export class Router {
   }
 
   start(): void {
-    this.ilink.onMessage((msg, text, refText) => {
-      this.handle(msg, text, refText).catch((e) => log.error('路由异常:', e));
+    this.ilink.onMessage((msg, text, refText, media) => {
+      this.handle(msg, text, refText, media).catch((e) => log.error('路由异常:', e));
     });
   }
 
@@ -67,12 +73,104 @@ export class Router {
     return this.sessions.get(uid).defaultTool || this.config.defaultTool;
   }
 
+  private getDefaultMsgMode(): MsgMode {
+    return this.normalizeMsgMode(DEFAULT_SETTINGS.msgMode);
+  }
 
-  private async handle(msg: WeixinMessage, text: string, refText: string): Promise<void> {
+  private normalizeMsgMode(mode?: string): MsgMode {
+    const v = (mode || '').toLowerCase();
+    if (v === 'verbose' || v === 'normal' || v === 'compact') return v;
+    return DEFAULT_SETTINGS.msgMode;
+  }
+
+  private normalizeModelArg(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+
+    const unquoted = trimmed.replace(/^["'“”]+|["'“”]+$/g, '');
+    const lower = unquoted.toLowerCase();
+    if (lower === 'default' || lower === 'reset' || unquoted === '默认' || unquoted === '默认模型') {
+      return '';
+    }
+
+const noTrailingSlash = unquoted.replace(/\/+$/, '');
+    const noSlashDotTail = noTrailingSlash.replace(/(?:\/[.。．])+$/u, '');
+    const normalized = noSlashDotTail.replace(/[。．.!！?？,，;；、]+$/u, '').trim();
+    const finalModel = normalized || noSlashDotTail;
+    const finalLower = finalModel.toLowerCase();
+
+    if (!finalModel || finalLower === 'default' || finalLower === 'reset' || finalModel === '默认' || finalModel === '默认模型') {
+      return '';
+    }
+
+    return finalModel;
+  }
+
+  private splitNormalActivityLines(lines: string[]): string[][] {
+    if (lines.length === 0) return [];
+
+    const singlePayloadLength = ['Activity', ...lines].join('\n').length;
+    if (lines.length <= NORMAL_ACTIVITY_MAX_LINES_PER_MESSAGE && singlePayloadLength <= NORMAL_ACTIVITY_MAX_CHARS_PER_MESSAGE) {
+      return [lines.slice()];
+    }
+
+    const batches: string[][] = [];
+    let current: string[] = [];
+    let currentLen = 'Activity'.length;
+
+    const flushCurrent = () => {
+      if (current.length === 0) return;
+      batches.push(current);
+      current = [];
+      currentLen = 'Activity'.length;
+    };
+
+    for (const line of lines) {
+      const nextLen = currentLen + 1 + line.length;
+      const exceedLineLimit = current.length >= NORMAL_ACTIVITY_MAX_LINES_PER_MESSAGE;
+      const exceedCharLimit = nextLen > NORMAL_ACTIVITY_MAX_CHARS_PER_MESSAGE;
+      if (current.length > 0 && (exceedLineLimit || exceedCharLimit)) flushCurrent();
+
+      current.push(line);
+      currentLen += 1 + line.length;
+    }
+
+    flushCurrent();
+    return batches;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async sendNormalActivityBatches(uid: string, lines: string[]): Promise<boolean> {
+    const batches = this.splitNormalActivityLines(lines);
+    if (batches.length <= 1) return false;
+
+    for (let i = 0; i < batches.length; i++) {
+      const title = `Activity (${i + 1}/${batches.length})`;
+      await this.ilink.sendText(uid, [title, ...batches[i]].join('\n'));
+      if (i < batches.length - 1) await this.sleep(NORMAL_ACTIVITY_SPLIT_DELAY_MS);
+    }
+    return true;
+  }
+
+
+  private async handle(msg: WeixinMessage, text: string, refText: string, media?: DownloadedMedia[]): Promise<void> {
     const uid = msg.from_user_id;
     if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(uid)) return;
 
     const trimmed = text.trim();
+
+    // Build media context for CLI
+    let mediaContext = '';
+    if (media && media.length > 0) {
+      const mediaInfo = media.map(m => {
+        const typeNames: Record<string, string> = { image: '图片', file: '文件', video: '视频' };
+        return `${typeNames[m.type] || '媒体'}: ${m.fileName} (${m.path})`;
+      });
+      mediaContext = `\n\n[收到媒体文件]\n${mediaInfo.join('\n')}`;
+    }
 
     // ── /command ──
     if (trimmed.startsWith('/')) {
@@ -91,7 +189,7 @@ export class Router {
       if (t1 && t2 && this.registry.isAvailable(t1) && this.registry.isAvailable(t2)) {
         const busy = [t1, t2].find(t => this.active.has(`${uid}:${t}`));
         if (busy) { await this.ilink.sendText(uid, `${busy} 在忙`); return; }
-        await this.chain(uid, t1, t2, prompt);
+        await this.chain(uid, t1, t2, prompt + mediaContext, media);
         return;
       }
     }
@@ -109,8 +207,8 @@ export class Router {
       const toolName = this.getCli(uid, rest, refText);
       this.sessions.update(uid, { defaultTool: toolName });
       if (this.active.has(`${uid}:${toolName}`)) { await this.ilink.sendText(uid, `${toolName} 在忙`); return; }
-      const fullPrompt = `以下是 ${prev.tool} 的输出:\n\n${prev.text}\n\n---\n\n${prompt}`;
-      await this.exec(uid, toolName, fullPrompt);
+      const fullPrompt = `以下是 ${prev.tool} 的输出:\n\n${prev.text}\n\n---\n\n${prompt}${mediaContext}`;
+      await this.exec(uid, toolName, fullPrompt, media);
       return;
     }
 
@@ -150,8 +248,8 @@ export class Router {
     if (this.active.has(`${uid}:${toolName}`)) { await this.ilink.sendText(uid, `${toolName} 在忙`); return; }
 
     const prompt = atMatch ? atMatch[2].trim() : trimmed;
-    const combined = [prompt, refText].filter(Boolean).join('\n\n');
-    await this.exec(uid, toolName, combined);
+    const combined = [prompt, refText].filter(Boolean).join('\n\n') + mediaContext;
+    await this.exec(uid, toolName, combined, media);
   }
 
   // ─── /command → ALL are commands, never pass through ────
@@ -183,7 +281,7 @@ export class Router {
           '/system <词>  追加系统提示',
           '/tools <列表>  允许工具',
           '/notool <列表>  禁用工具',
-          '/verbose  详细输出',
+          '/verbose  CLI详细输出(Kimi)',
           '/bare  跳过配置加载',
           '/adddir <路径>  额外目录',
           '/name <名>  会话命名',
@@ -195,6 +293,8 @@ export class Router {
           '/include <目录>  上下文(Gemini)',
           '/ext <名>  扩展(Gemini)',
           '/thinking  深度思考(Kimi)',
+          '/thoughts  显示AI思考内容',
+          '/msgmode <verbose|normal|compact|default>  消息详细度',
           '',
           '— 操作 —',
           '/diff  查看git差异',
@@ -205,6 +305,7 @@ export class Router {
           '/files  列出目录结构',
           '/compact  压缩上下文(清session)',
           '/stats  使用统计',
+          '/send <文件路径>  发送文件到微信',
           '',
           '— 会话 —',
           '/new  新会话',
@@ -228,6 +329,8 @@ export class Router {
 
       case 'status': case 'st': {
         const def = settings.defaultTool || this.config.defaultTool;
+        const currentMsgMode = this.normalizeMsgMode(settings.msgMode);
+        const defaultMsgMode = this.getDefaultMsgMode();
         const sids = Object.entries(settings.sessionIds).map(([k, v]) => `${k}:${String(v).substring(0, 8)}`).join(' ') || '无';
         const lines = [
           `工具: ${def}`,
@@ -238,7 +341,9 @@ export class Router {
           `budget: ${settings.maxBudget > 0 ? '$' + settings.maxBudget : '无限'}`,
           `sandbox: ${settings.sandbox || '无'}`,
           `search: ${settings.search ? 'ON' : 'OFF'}`,
-          `verbose: ${settings.verbose ? 'ON' : 'OFF'}`,
+          `msgMode: ${currentMsgMode} (默认: ${defaultMsgMode})`,
+          `thoughts: ${settings.showThoughts ? 'ON' : 'OFF'}`,
+          `cliVerbose: ${settings.verbose ? 'ON' : 'OFF'} (Kimi)`,
           `system: ${settings.systemPrompt ? settings.systemPrompt.substring(0, 40) + '...' : '无'}`,
           `dir: ${settings.workDir || this.config.workDir}`,
           `会话: ${sids}`,
@@ -264,12 +369,13 @@ export class Router {
       }
 
       case 'model': case 'm':
-        if (!arg || arg === 'reset' || arg === 'default') {
+        const model = this.normalizeModelArg(arg);
+        if (!model) {
           this.sessions.update(uid, { model: '' });
           await reply('model → 默认');
         } else {
-          this.sessions.update(uid, { model: arg });
-          await reply(`model → ${arg}`);
+          this.sessions.update(uid, { model });
+          await reply(`model → ${model}`);
         }
         return true;
 
@@ -361,7 +467,7 @@ export class Router {
 
       case 'verbose': case 'v':
         this.sessions.update(uid, { verbose: !settings.verbose });
-        await reply(`verbose → ${!settings.verbose ? 'ON' : 'OFF'}`);
+        await reply(`verbose(Kimi CLI) → ${!settings.verbose ? 'ON' : 'OFF'}`);
         return true;
 
       // ═══════════════════════════════════════════
@@ -405,6 +511,77 @@ export class Router {
       case 'thinking': {
         this.sessions.update(uid, { thinking: !settings.thinking });
         await reply(`thinking → ${!settings.thinking ? 'ON (深度思考)' : 'OFF'}`);
+        return true;
+      }
+
+      case 'thoughts': {
+        const newValue = !settings.showThoughts;
+        this.sessions.update(uid, { showThoughts: newValue });
+        await reply(`thoughts → ${newValue ? '已开启 (将显示AI思考)' : '已关闭'}`);
+        return true;
+      }
+
+      case 'msgmode': {
+        const defaultMode = this.getDefaultMsgMode();
+        const currentMode = this.normalizeMsgMode(settings.msgMode);
+        const highRiskNow = currentMode === 'verbose' && !!settings.showThoughts;
+        const warning = '⚠️ 警告: 高频交互任务（如浏览器操作）不建议同时开启 /thoughts + /msgmode verbose，可能触发 iLink 限流，通常约 2-3 分钟恢复。';
+        const modes: Record<string, MsgMode> = {
+          verbose: 'verbose',
+          detailed: 'verbose',
+          normal: 'normal',
+          compact: 'compact',
+          simple: 'compact',
+        };
+        if (!arg) {
+          await reply([
+            `当前: ${currentMode}`,
+            `默认: ${defaultMode}`,
+            '/msgmode <verbose|normal|compact|default>',
+            '',
+            'verbose - 流式显示文本 + Activity(含摘要)',
+            'normal  - 流式显示文本，Activity仅在最终结果展示',
+            'compact - 仅显示最终结果',
+            '',
+            '(思考内容由 /thoughts 控制)',
+            '',
+            warning,
+            `当前风险: ${highRiskNow ? '高' : '正常'}`,
+          ].join('\n'));
+          return true;
+        }
+
+        const lower = arg.toLowerCase();
+        if (lower === 'default' || lower === 'reset') {
+          this.sessions.update(uid, { msgMode: defaultMode });
+          const risk = defaultMode === 'verbose' && !!settings.showThoughts ? '高' : '正常';
+          await reply(`msgmode: ${currentMode} → ${defaultMode}\n当前: ${defaultMode} | 默认: ${defaultMode}\n当前风险: ${risk}\n\n${warning}`);
+          return true;
+        }
+
+        const v = modes[lower];
+        if (!v) {
+          await reply(`无效 msgmode: ${arg}\n当前: ${currentMode}\n默认: ${defaultMode}\n/msgmode <verbose|normal|compact|default>`);
+          return true;
+        }
+
+        this.sessions.update(uid, { msgMode: v });
+        const desc: Record<MsgMode, string> = {
+          verbose: '流式显示文本 + Activity(含摘要)',
+          normal: '流式显示文本，Activity仅在最终结果展示',
+          compact: '仅显示最终结果',
+        };
+        const highRisk = v === 'verbose' && !!settings.showThoughts;
+        await reply([
+          `msgmode: ${currentMode} → ${v}`,
+          `当前: ${v} | 默认: ${defaultMode}`,
+          `当前风险: ${highRisk ? '高' : '正常'}`,
+          '',
+          desc[v],
+          '',
+          '(思考内容由 /thoughts 控制)',
+          ...(highRisk ? ['', warning] : []),
+        ].join('\n'));
         return true;
       }
 
@@ -461,7 +638,7 @@ export class Router {
           allowedTools: '', disallowedTools: '', verbose: false, sandbox: '',
           search: false, systemPrompt: '', workDir: '', bare: false, addDir: '',
           sessionName: '', ephemeral: false, profile: '', approvalMode: '',
-          includeDirs: '', extensions: '',
+          includeDirs: '', extensions: '', showThoughts: false, msgMode: this.getDefaultMsgMode(),
         } as any);
         await reply('所有设置已重置');
         return true;
@@ -553,6 +730,35 @@ export class Router {
         const tool = settings.defaultTool || this.config.defaultTool;
         if (this.registry.isAvailable(tool)) {
           await this.exec(uid, tool, 'List all files in the current working directory. Show the tree structure concisely.');
+        }
+        return true;
+      }
+
+      case 'send': {
+        if (!arg) {
+          await reply('/send <文件路径>\n发送本地文件到微信');
+          return true;
+        }
+        try {
+          const filePath = arg.trim();
+          const { existsSync } = await import('node:fs');
+          if (!existsSync(filePath)) {
+            await reply(`文件不存在: ${filePath}`);
+            return true;
+          }
+          const ext = filePath.split('.').pop()?.toLowerCase();
+          if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext || '')) {
+            await this.ilink.sendImage(uid, filePath);
+            await reply(`已发送图片: ${filePath}`);
+          } else if (['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext || '')) {
+            await this.ilink.sendVideo(uid, filePath);
+            await reply(`已发送视频: ${filePath}`);
+          } else {
+            await this.ilink.sendFile(uid, filePath);
+            await reply(`已发送文件: ${filePath}`);
+          }
+        } catch (err) {
+          await reply(`发送失败: ${(err as Error).message}`);
         }
         return true;
       }
@@ -695,7 +901,7 @@ export class Router {
     try {
       // Claude: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
       // Codex: ~/.codex/sessions/YYYY/MM/DD/*.jsonl
-      // Gemini: different structure
+      // OpenCode: uses 'opencode session list --format json'
       let dir = '';
       if (tool === 'claude') {
         const encoded = workDir.replace(/[^a-zA-Z0-9]/g, '-');
@@ -703,6 +909,8 @@ export class Router {
       } else if (tool === 'codex') {
         dir = join(homedir(), '.codex', 'sessions');
         return this.listCodexSessions(dir);
+      } else if (tool === 'opencode') {
+        return this.listOpenCodeSessions(workDir);
       } else {
         return [];
       }
@@ -716,17 +924,22 @@ export class Router {
             const stat = statSync(fullPath);
             const firstLines = readFileSync(fullPath, 'utf-8').split('\n').slice(0, 5);
             let summary = '(无摘要)';
-            let date = stat.mtime.toISOString().slice(0, 16).replace('T', ' ');
+            let date = stat.mtime.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-');
             for (const line of firstLines) {
               if (!line.trim()) continue;
               try {
                 const obj = JSON.parse(line);
                 if (obj.type === 'user' && obj.message?.content) {
-                  const content = typeof obj.message.content === 'string'
+                  let content = typeof obj.message.content === 'string'
                     ? obj.message.content
                     : obj.message.content.map((b: { text?: string }) => b.text || '').join('');
+                  // 移除系统注入的提示
+                  content = content.replace(/\n\n\[提示:.*?\]$/, '');
                   summary = content.substring(0, 60) + (content.length > 60 ? '...' : '');
-                  if (obj.timestamp) date = obj.timestamp.slice(0, 16).replace('T', ' ');
+                  if (obj.timestamp) {
+                    const ts = new Date(obj.timestamp);
+                    date = ts.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-');
+                  }
                   break;
                 }
               } catch { continue; }
@@ -777,9 +990,31 @@ export class Router {
     }
   }
 
+  private listOpenCodeSessions(workDir: string): Array<{ id: string; date: string; summary: string }> {
+    try {
+      const stdout = execSync('opencode session list --format json -n 15', {
+        cwd: workDir,
+        encoding: 'utf-8',
+        timeout: 5000,
+      });
+      const sessions = JSON.parse(stdout);
+      return sessions.map((s: { id: string; title: string; updated: number }) => {
+        const date = new Date(s.updated).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-');
+        return {
+          id: s.id,
+          date,
+          summary: s.title || '(无标题)',
+        };
+      });
+    } catch (err) {
+      log.debug(`[opencode] session list failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
   // ─── Chain: tool1 → tool2 ─────────────────────────────
 
-  private async chain(uid: string, tool1: string, tool2: string, prompt: string): Promise<void> {
+  private async chain(uid: string, tool1: string, tool2: string, prompt: string, media?: DownloadedMedia[]): Promise<void> {
     const adapter1 = this.registry.get(tool1);
     const adapter2 = this.registry.get(tool2);
     if (!adapter1 || !adapter2) return;
@@ -793,7 +1028,7 @@ export class Router {
     try {
       // Step 1: run tool1
       log.debug(`[chain] step1: ${tool1}`);
-      const { result: r1, notice: n1 } = await this.runOnce(tool1, uid, prompt, abort.signal);
+      const { result: r1, notice: n1 } = await this.runOnce(tool1, uid, prompt, abort.signal, media);
 
       if (abort.signal.aborted || r1.error) {
         if (!abort.signal.aborted) {
@@ -849,15 +1084,30 @@ export class Router {
     uid: string,
     prompt: string,
     signal: AbortSignal,
+    media?: DownloadedMedia[],
+    onIntermediate?: (msg: import('../adapters/base.js').IntermediateMessage) => void,
   ): Promise<{ result: import('../adapters/base.js').ExecResult; notice: string }> {
     const adapter = this.registry.get(toolName)!;
     const extraArgs = this.config.tools[toolName]?.args;
-    const hadSession = adapter.capabilities.sessionResume && !!this.sessions.get(uid).sessionIds[toolName];
+    const initialSettings = this.sessions.get(uid);
+    const normalizedModel = this.normalizeModelArg(initialSettings.model || '');
+    if (normalizedModel !== initialSettings.model) {
+      this.sessions.update(uid, { model: normalizedModel });
+    }
+    const settings = this.sessions.get(uid);
+    const hadSession = adapter.capabilities.sessionResume && !!settings.sessionIds[toolName];
 
     if (signal.aborted) return { result: { text: '已取消', error: true }, notice: '' };
-    const result = await adapter.execute(prompt, {
-      settings: this.sessions.get(uid), workDir: this.config.workDir, timeout: this.config.cliTimeout, extraArgs, signal,
+
+    // 追加 SEND_FILE 提示到 prompt
+    const sendFileHint = '\n\n[提示: 如果需要发送文件/图片到微信，在响应中包含标记 [SEND_FILE: 文件路径]]';
+    const enhancedPrompt = prompt + sendFileHint;
+
+    const result = await adapter.execute(enhancedPrompt, {
+      settings, workDir: this.config.workDir, timeout: this.config.cliTimeout, extraArgs, signal,
       askUser: (req) => this.askUserViaWeChat(uid, toolName, req),
+      media,
+      onIntermediate,
     });
 
     if (result.sessionExpired && hadSession && !signal.aborted) {
@@ -923,7 +1173,7 @@ export class Router {
     return answers;
   }
 
-  private async exec(uid: string, toolName: string, prompt: string): Promise<void> {
+  private async exec(uid: string, toolName: string, prompt: string, media?: DownloadedMedia[]): Promise<void> {
     const adapter = this.registry.get(toolName);
     if (!adapter) return;
 
@@ -931,9 +1181,113 @@ export class Router {
     this.active.set(`${uid}:${toolName}`, { abort, tool: toolName });
     const stopTyping = await this.ilink.startTyping(uid);
     const start = Date.now();
+    const settings = this.sessions.get(uid);
+    const msgMode = this.normalizeMsgMode(settings.msgMode);
+
+    // Track if we've streamed text (to avoid duplicate with final result)
+    let hasStreamedText = false;
+    let intermediateSendFailed = false;
+
+    // Serialize intermediate sends in-order to avoid burst/concurrency.
+    let sendQueue: Promise<void> = Promise.resolve();
+    const enqueueIntermediateSend = (text: string): void => {
+      if (!text.trim()) return;
+      sendQueue = sendQueue
+        .then(() => this.ilink.sendText(uid, text, { streamType: 'intermediate' }))
+        .catch((err) => {
+          intermediateSendFailed = true;
+          log.error(`[${toolName}] 发送中间消息失败:`, err);
+        });
+    };
+
+    // Keep text/thinking and tool activity as two independent streams.
+    // This allows tool blocks to be sent as standalone messages while preserving order.
+    const textLines: string[] = [];
+    const activityLines: string[] = [];
+    const finalActivityLines: string[] = [];
+    let textFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushTextBatch = (): void => {
+      if (textFlushTimer) {
+        clearTimeout(textFlushTimer);
+        textFlushTimer = null;
+      }
+      if (textLines.length === 0) return;
+      const payload = textLines.join('\n\n');
+      textLines.length = 0;
+      enqueueIntermediateSend(payload);
+    };
+
+    const flushActivityBatch = (): void => {
+      if (msgMode !== 'verbose') {
+        activityLines.length = 0;
+        return;
+      }
+      if (activityLines.length === 0) return;
+      const payload = ['Activity', ...activityLines].join('\n');
+      activityLines.length = 0;
+      enqueueIntermediateSend(payload);
+    };
+
+    const scheduleTextFlush = (): void => {
+      if (textFlushTimer) clearTimeout(textFlushTimer);
+      textFlushTimer = setTimeout(() => {
+        textFlushTimer = null;
+        flushTextBatch();
+      }, 2500);
+    };
+
+    // Streaming intermediate messages (for verbose/normal mode)
+    const onIntermediate = msgMode !== 'compact' ? (msg: import('../adapters/base.js').IntermediateMessage) => {
+      const content = typeof msg.content === 'string' ? msg.content.trim() : '';
+      switch (msg.type) {
+        case 'tool_use':
+          if (msgMode === 'normal') {
+            finalActivityLines.push(content || `- ${msg.toolName || 'Tool'}`);
+          } else if (msgMode === 'verbose') {
+            // Boundary: flush pending text first, then append activity.
+            flushTextBatch();
+            if (content) {
+              activityLines.push(content);
+            } else {
+              activityLines.push(`- ${msg.toolName || 'Tool'}`);
+            }
+          }
+          break;
+        case 'thinking':
+          // thinking 显示只由 showThoughts 控制，与 msgMode 无关
+          if (settings.showThoughts && content) {
+            // Boundary: flush pending activity first, then append text.
+            flushActivityBatch();
+            textLines.push(`💭 ${content}`);
+            scheduleTextFlush();
+          }
+          break;
+        case 'text':
+          if (content) {
+            hasStreamedText = true;
+            // Boundary: flush pending activity first, then append text.
+            flushActivityBatch();
+            textLines.push(content);
+            scheduleTextFlush();
+          }
+          break;
+        case 'tool_result':
+          if (msgMode === 'verbose' && content) {
+            flushTextBatch();
+            activityLines.push(content);
+          }
+          break;
+      }
+    } : undefined;
 
     try {
-      const { result, notice } = await this.runOnce(toolName, uid, prompt, abort.signal);
+      const { result, notice } = await this.runOnce(toolName, uid, prompt, abort.signal, media, onIntermediate);
+
+      // Ensure all buffered intermediate content is emitted before final response.
+      flushTextBatch();
+      flushActivityBatch();
+      await sendQueue;
 
       if (abort.signal.aborted) return;
 
@@ -941,23 +1295,99 @@ export class Router {
         this.sessions.setSession(uid, toolName, result.sessionId);
       }
 
+      // Parse [SEND_FILE: path] markers and send files
+      const { text: cleanText, sentFiles } = await this.parseAndSendFiles(uid, result.text);
+
       // Store for >> relay; auto-switch defaultTool to last used tool
-      this.lastResponse.set(uid, { tool: adapter.displayName, text: result.text });
+      this.lastResponse.set(uid, { tool: adapter.displayName, text: cleanText });
       this.sessions.update(uid, { defaultTool: toolName });
 
-      await this.ilink.sendText(uid, formatResponse(notice + result.text, {
-        tool: adapter.displayName,
-        duration: result.duration || (Date.now() - start),
-        error: result.error,
-      }));
+      // Send thinking content if enabled (only in compact mode, non-compact already streamed)
+      if (settings.showThoughts && result.thinking && msgMode === 'compact') {
+        await this.ilink.sendText(uid, `💭 思考:\n${result.thinking}\n\n---`);
+      }
+
+      const sentNotice = sentFiles.length > 0
+        ? `\n[已发送文件: ${sentFiles.join(', ')}]`
+        : '';
+
+      const splitActivitySent = msgMode === 'normal' && finalActivityLines.length > 0
+        ? await this.sendNormalActivityBatches(uid, finalActivityLines)
+        : false;
+
+      const finalActivityBlock = msgMode === 'normal' && finalActivityLines.length > 0 && !splitActivitySent
+        ? `Activity\n${finalActivityLines.join('\n')}\n\n`
+        : '';
+
+      // If text was already streamed, only send footer (avoid duplicate large-body resend).
+      if (hasStreamedText) {
+        const tailNotice = intermediateSendFailed
+          ? `${notice}[部分中间消息发送失败]${sentNotice}`
+          : `${notice}${sentNotice}`;
+        await this.ilink.sendText(uid, formatResponse(`${finalActivityBlock}${tailNotice}`.trim(), {
+          tool: adapter.displayName,
+          duration: result.duration || (Date.now() - start),
+          error: result.error,
+        }));
+      } else {
+        // compact mode or no streamed text: send full result
+        await this.ilink.sendText(uid, formatResponse(`${finalActivityBlock}${notice}${cleanText}${sentNotice}`, {
+          tool: adapter.displayName,
+          duration: result.duration || (Date.now() - start),
+          error: result.error,
+        }));
+      }
     } catch (err: unknown) {
       if (!abort.signal.aborted) {
         log.error(`[${toolName}] 失败:`, err);
         await this.ilink.sendText(uid, `失败: ${(err as Error).message}`);
       }
     } finally {
+      // Defensive cleanup for pending timer when task exits early.
+      if (textFlushTimer) clearTimeout(textFlushTimer);
       stopTyping();
       this.active.delete(`${uid}:${toolName}`);
     }
+  }
+
+  private async parseAndSendFiles(uid: string, text: string): Promise<{ text: string; sentFiles: string[] }> {
+    const { existsSync } = await import('node:fs');
+    const sentFiles: string[] = [];
+    const regex = /\[SEND_FILE:\s*([^\]]+)\]/g;
+    let match;
+    const workDir = this.sessions.get(uid).workDir || this.config.workDir;
+
+    while ((match = regex.exec(text)) !== null) {
+      let filePath = match[1].trim();
+      
+      // 处理相对路径
+      if (!filePath.match(/^[A-Za-z]:/) && !filePath.startsWith('/')) {
+        filePath = join(workDir, filePath);
+      }
+
+      try {
+        if (!existsSync(filePath)) {
+          log.warn(`[SEND_FILE] 文件不存在: ${filePath}`);
+          continue;
+        }
+
+        const ext = filePath.split('.').pop()?.toLowerCase();
+        if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext || '')) {
+          await this.ilink.sendImage(uid, filePath);
+        } else if (['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext || '')) {
+          await this.ilink.sendVideo(uid, filePath);
+        } else {
+          await this.ilink.sendFile(uid, filePath);
+        }
+        sentFiles.push(filePath.split(/[\\/]/).pop() || filePath);
+        log.info(`[SEND_FILE] 已发送: ${filePath}`);
+      } catch (err) {
+        log.error(`[SEND_FILE] 发送失败: ${filePath}`, err);
+      }
+    }
+
+    // 移除标记
+    const cleanText = text.replace(regex, '').trim();
+    return { text: cleanText, sentFiles };
   }
 }

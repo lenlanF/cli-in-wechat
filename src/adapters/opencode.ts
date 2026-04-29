@@ -1,6 +1,53 @@
 import { log } from '../utils/logger.js';
 import type { CLIAdapter, ExecOptions, ExecResult, AdapterCapabilities } from './base.js';
 import { commandExists, spawnProc, setupAbort, setupTimeout, stripAnsi } from './base.js';
+import type { DownloadedMedia } from '../utils/media.js';
+import { copyMediaToWorkDir } from '../utils/media.js';
+import { execSync } from 'node:child_process';
+
+const modelResolveCache = new Map<string, string>();
+
+export function resolveBareModelFromList(model: string, availableModels: string[]): string {
+  const raw = model.trim().replace(/\/+$/, '');
+  if (!raw || raw.includes('/')) return raw;
+
+  const suffix = `/${raw.toLowerCase()}`;
+  const matches = availableModels
+    .map((item) => item.trim())
+    .filter((item) => item.includes('/'))
+    .filter((item) => item.toLowerCase().endsWith(suffix));
+
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) return raw;
+
+  const preferred = matches.find((item) => /baiduqianfancodingplan/i.test(item));
+  return preferred || raw;
+}
+
+function buildMediaPrompt(prompt: string, media?: DownloadedMedia[], workDir?: string): string {
+  if (!media || media.length === 0) return prompt;
+  
+  const copiedMedia = workDir ? media.map(m => copyMediaToWorkDir(m, workDir)) : media;
+  
+  const fileList = copiedMedia.map(m => {
+    const relativePath = workDir && m.path.startsWith(workDir) 
+      ? m.path.slice(workDir.length).replace(/^[\/\\]/, '')
+      : m.path;
+    const typeNames: Record<string, string> = { image: '图片', file: '文件', video: '视频' };
+    const sizeStr = m.size ? `${(m.size / 1024).toFixed(1)}KB` : '未知大小';
+    return `- ${m.fileName}\n  类型: ${typeNames[m.type] || '文件'}\n  大小: ${sizeStr}\n  路径: ${relativePath}`;
+  }).join('\n\n');
+  
+  const userPrompt = prompt.trim() && !prompt.startsWith('[文件:') && !prompt.startsWith('[图片:') && !prompt.startsWith('[视频:')
+    ? `\n\n用户说：${prompt}`
+    : '';
+  
+  return `已接收到用户通过微信发送的文件：
+
+${fileList}
+
+文件已保存到工作目录。请勿主动读取或处理这些文件，等待用户明确指示需要做什么。${userPrompt}`;
+}
 
 function cleanJsonLines(text: string): string {
   const lines = text.split('\n').filter(Boolean);
@@ -28,7 +75,7 @@ export class OpenCodeAdapter implements CLIAdapter {
     streaming: false,
     jsonOutput: true,
     sessionResume: true,
-    modes: ['auto'],
+    modes: ['auto', 'safe', 'plan'],
     hasEffort: false,
     hasModel: true,
     hasSearch: false,
@@ -37,18 +84,57 @@ export class OpenCodeAdapter implements CLIAdapter {
 
   async isAvailable(): Promise<boolean> { return commandExists(this.command); }
 
+  private resolveModelArg(model: string, workDir?: string): string {
+    const raw = model.trim().replace(/\/+$/, '');
+    if (!raw || raw.includes('/')) return raw;
+
+    const key = raw.toLowerCase();
+    const cached = modelResolveCache.get(key);
+    if (cached) return cached;
+
+    try {
+      const output = execSync('opencode models', {
+        cwd: workDir,
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const availableModels = output
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const resolved = resolveBareModelFromList(raw, availableModels);
+      if (resolved !== raw) {
+        modelResolveCache.set(key, resolved);
+        log.debug(`[opencode] model alias resolved: ${raw} -> ${resolved}`);
+        return resolved;
+      }
+      log.warn(`[opencode] model not found in available models: ${raw}, tried: ${availableModels.slice(0, 10).join(', ')}`);
+      return raw;
+    } catch (err) {
+      log.warn(`[opencode] models command failed: ${(err as Error).message}`);
+      return raw;
+    }
+  }
+
   execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       const { settings } = opts;
-      const args = ['run', prompt, '--format', 'json'];
-
-      if (settings.model) {
-        args.push('-m', settings.model);
-      }
-
       const workDir = settings.workDir || opts.workDir;
+      const fullPrompt = buildMediaPrompt(prompt, opts.media, workDir);
+      const args = ['run', '--format', 'json', '--thinking'];
+
       if (workDir) {
         args.push('--dir', workDir);
+      }
+
+      if (settings.mode === 'auto') {
+        args.push('--dangerously-skip-permissions');
+      }
+
+      if (settings.model) {
+        const resolvedModel = this.resolveModelArg(settings.model, workDir);
+        args.push('-m', resolvedModel);
       }
 
       const sessionId = settings.sessionIds[this.name];
@@ -58,13 +144,16 @@ export class OpenCodeAdapter implements CLIAdapter {
 
       if (opts.extraArgs) args.push(...opts.extraArgs);
 
-      log.debug(`[opencode] executing`);
+      log.debug(`[opencode] executing: run --format json --thinking`);
 
       const proc = spawnProc(this.command, args, {
         cwd: workDir,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env },
       });
+
+      proc.stdin!.write(fullPrompt, 'utf8');
+      proc.stdin!.end();
 
       setupAbort(proc, opts.signal);
       const timer = setupTimeout(proc, opts.timeout);
@@ -78,36 +167,51 @@ export class OpenCodeAdapter implements CLIAdapter {
         if (timer) clearTimeout(timer);
         if (opts.signal?.aborted) { resolve({ text: '已取消', error: true }); return; }
 
+        log.debug(`[opencode] stdout length: ${stdout.length}, first 500 chars: ${stdout.substring(0, 500)}`);
+
         try {
-          const lines = stdout.trim().split('\n').filter(Boolean);
-          const results: string[] = [];
+          let text = '';
+          let thinking = '';
           let sessionId: string | undefined;
+          let hasError = code !== 0;
 
+          const lines = stdout.trim().split('\n');
           for (const line of lines) {
+            if (!line.trim()) continue;
             try {
-              const r = JSON.parse(line);
-              if (r.type === 'text' && r.part?.text) {
-                results.push(r.part.text);
+              const obj = JSON.parse(line);
+              if (obj.type === 'text' && obj.part?.text) {
+                text += obj.part.text;
               }
-              if (r.sessionID && !sessionId) {
-                sessionId = r.sessionID;
+              if (obj.type === 'reasoning' && obj.part?.text) {
+                thinking += obj.part.text;
+                log.debug(`[opencode] found reasoning, length: ${obj.part.text.length}`);
               }
-            } catch { /* skip invalid json lines */ }
+              if (obj.sessionID && !sessionId) {
+                sessionId = obj.sessionID;
+              }
+              if (obj.type === 'step_finish' && obj.part?.reason === 'error') {
+                hasError = true;
+              }
+            } catch {
+              // ignore parse errors for individual lines
+            }
           }
 
-          if (results.length > 0) {
-            resolve({
-              text: results.join('\n'),
-              error: code !== 0,
-              sessionId,
-            });
-            return;
+          log.debug(`[opencode] final thinking length: ${thinking.length}`);
+          if (text) {
+            resolve({ text, thinking: thinking || undefined, sessionId, error: hasError });
+          } else {
+            // Fallback: try cleanJsonLines for better error messages
+            const rawText = stripAnsi(stdout.trim() || stderr.trim());
+            const cleanText = cleanJsonLines(rawText);
+            resolve({ text: cleanText || `exit ${code}`, error: code !== 0 });
           }
-        } catch { /* fallthrough */ }
-
-        const rawText = stripAnsi(stdout.trim() || stderr.trim());
-        const cleanText = cleanJsonLines(rawText);
-        resolve({ text: cleanText || `exit ${code}`, error: code !== 0 });
+        } catch {
+          const rawText = stripAnsi(stdout.trim() || stderr.trim());
+          const cleanText = cleanJsonLines(rawText);
+          resolve({ text: cleanText || `exit ${code}`, error: code !== 0 });
+        }
       });
       proc.on('error', (err) => {
         if (timer) clearTimeout(timer);

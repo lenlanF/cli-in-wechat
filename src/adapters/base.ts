@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { log } from '../utils/logger.js';
+import type { DownloadedMedia } from '../utils/media.js';
 
 export type ToolMode = 'auto' | 'safe' | 'plan';
+export type MsgMode = 'verbose' | 'normal' | 'compact';
 
 export interface UserSettings {
   // ── Universal ──
@@ -36,6 +38,10 @@ export interface UserSettings {
   approvalMode: string;
   includeDirs: string;
   extensions: string;
+
+  // ── Output ──
+  showThoughts: boolean;
+  msgMode: MsgMode;
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -62,6 +68,8 @@ export const DEFAULT_SETTINGS: UserSettings = {
   approvalMode: '',
   includeDirs: '',
   extensions: '',
+  showThoughts: false,
+  msgMode: 'normal',
 };
 
 export interface AskUserRequest {
@@ -79,16 +87,26 @@ export interface ExecOptions {
   extraArgs?: string[];
   signal?: AbortSignal;
   askUser?: (req: AskUserRequest) => Promise<Record<string, string>>;
+  media?: DownloadedMedia[];
+  /** Callback for streaming intermediate messages to WeChat */
+  onIntermediate?: (msg: IntermediateMessage) => void;
 }
 
 export interface ExecResult {
   text: string;
+  thinking?: string;
   sessionId?: string;
   cost?: number;
   duration?: number;
   error?: boolean;
   /** Set by the adapter when the error is positively identified as a session/resume failure. */
   sessionExpired?: boolean;
+}
+
+export interface IntermediateMessage {
+  type: 'thinking' | 'text' | 'tool_use' | 'tool_result';
+  content: string;
+  toolName?: string;
 }
 
 export interface AdapterCapabilities {
