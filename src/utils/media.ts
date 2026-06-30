@@ -16,6 +16,7 @@ export interface DownloadedMedia {
   fileName: string;
   mimeType?: string;
   size?: number;
+  nasPath?: string;
 }
 
 export function ensureMediaDir(workDir?: string): string {

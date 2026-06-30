@@ -211,7 +211,8 @@ function buildMediaPrompt(prompt: string, media?: DownloadedMedia[], workDir?: s
       : m.path;
     const typeNames: Record<string, string> = { image: '图片', file: '文件', video: '视频' };
     const sizeStr = m.size ? `${(m.size / 1024).toFixed(1)}KB` : '未知大小';
-    return `- ${m.fileName}\n  类型: ${typeNames[m.type] || '文件'}\n  大小: ${sizeStr}\n  路径: ${relativePath}`;
+    const nasPath = m.nasPath ? `\n  NAS路径: ${m.nasPath}` : '';
+    return `- ${m.fileName}\n  类型: ${typeNames[m.type] || '文件'}\n  大小: ${sizeStr}\n  路径: ${relativePath}${nasPath}`;
   }).join('\n\n');
   
   const userPrompt = prompt.trim() && !prompt.startsWith('[文件:') && !prompt.startsWith('[图片:') && !prompt.startsWith('[视频:')

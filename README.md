@@ -1,320 +1,199 @@
 # cli-in-wechat
 
-在微信中运行主流 AI 编程 CLI 工具 —— 通过微信 ClawBot 官方 iLink Bot API 实现。
+在微信里调用本机 AI 编程 CLI、局域网其他设备上的 AI 智能体，并把微信文件自动归档到局域网 NAS。
 
-**支持的工具：** Claude Code / Codex CLI / Gemini CLI / Hermes Agent / Kimi Code / OpenClaw / OpenCode
-
-## 它是什么
-
-一个运行在你电脑上的桥接服务。微信是遥控器，电脑是执行端。
-
-```
-微信 ClawBot (手机)
-    ↕  iLink Bot API — 微信官方消息通道 (不封号)
-桥接服务 (你的电脑)
-    ↕  spawn / Agent SDK
-claude -p / codex exec / gemini -p / hermes chat -q / kimi --print / opencode -p
-```
+这个项目是一个运行在你电脑上的桥接服务：微信负责输入和文件传输，电脑负责接入 ClawBot iLink API、调用本机/局域网 Agent、保存媒体文件并转存 NAS。
 
 ## 功能
 
-- **7 大 CLI 工具**，通过 `@` 前缀随时切换
-- **最高权限默认开启**
-- **文件传输**：发送/接收图片、文件、视频（自动解密微信 CDN 媒体）
-- **AskUserQuestion**：Claude Code 的交互式提问转发到微信（Agent SDK）
-- **会话续接**：连续对话自动保持上下文
-- **`/resume`**：浏览所有历史会话，选编号恢复（类似终端的 `/resume`）
-- **跨通道漫游**：`/session set <id>` 从终端接续同一会话
-- **工具接力**：`>>` 传递上条结果，`@tool1>tool2` 链式调用
-- **40+ `/` 命令**覆盖所有 CLI 核心 flag
-- **微信引用消息智能路由**：回复哪条消息就由哪个工具接手
-- **流式中间消息**：AI 执行过程中的进度实时推送到微信
+- 微信 ClawBot 官方 iLink Bot API 收发消息
+- Claude Code / Codex CLI / Gemini CLI / Hermes Agent / Kimi Code / OpenClaw / OpenCode
+- `@工具名` 切换工具，支持 `@tool1>tool2` 链式调用和 `>>` 接力
+- `remoteAgents`：通过 HTTP JSON 调用同局域网其他设备上的 AI Agent
+- 微信图片、文件、视频自动下载并解密
+- `nasArchive`：微信文件自动复制到指定 NAS 目录，默认按日期归档并避免覆盖
+- 会话续接、`/resume`、`/session set <id>`
+- AI 输出 `[SEND_FILE: /path/to/file]` 时自动把文件发回微信
+
+## 架构
+
+```text
+微信 ClawBot
+  <-> iLink Bot API
+cli-in-wechat 桥接服务
+  <-> 本机 AI CLI: claude / codex / gemini / hermes / kimi / openclaw / opencode
+  <-> 局域网 HTTP Agent: @lan / @nasbot / 自定义名称
+  <-> NAS 共享目录: \\NAS\wechat-inbox
+```
 
 ## 安装
 
-### 前置要求
+前置要求：
 
-- **Node.js** >= 18
-- **微信** 已启用 ClawBot 插件（我 → 设置 → 插件）
-- 至少一个 CLI 工具：
-
-```bash
-npm install -g @anthropic-ai/claude-code   # Claude Code
-npm install -g @openai/codex                # Codex CLI
-npm install -g @google/gemini-cli           # Gemini CLI
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash  # Hermes Agent
-curl -LsSf https://code.kimi.com/install.sh | bash  # Kimi Code
-npm install -g openclaw@latest              # OpenClaw
-brew install opencode-ai/tap/opencode       # OpenCode
-```
-
-### 运行
+- Node.js >= 18
+- 微信已启用 ClawBot 插件
+- 至少一个本机 CLI 工具，或配置一个 `remoteAgents` 远端 Agent
 
 ```bash
-git clone https://github.com/liangminmx/cli-in-wechat.git
+git clone https://github.com/lenlanF/cli-in-wechat.git
 cd cli-in-wechat
-npm install
-npm run dev           # 开发模式
-npm run dev:debug     # 调试模式
+npm ci
+npm run dev
 ```
 
-首次运行显示 QR 码，用微信扫码登录 ClawBot。
-
-### CLI 工具认证
-
-```bash
-claude          # Anthropic 订阅账号
-codex           # ChatGPT 账号
-gemini          # 设置 GEMINI_API_KEY 或 OAuth
-hermes model    # Hermes 选择模型/提供商
-kimi login      # Kimi OAuth
-openclaw onboard  # OpenClaw 设置向导
-# OpenCode: 设置 ANTHROPIC_API_KEY / OPENAI_API_KEY 等环境变量
-```
-
-## 使用方法
-
-### 发消息
-
-| 输入 | 行为 |
-|---|---|
-| 直接打字 | 发给上次使用的工具 |
-| `@claude 写排序算法` | Claude Code |
-| `@codex fix the bug` | Codex CLI |
-| `@gemini 解释代码` | Gemini CLI |
-| `@hermes 分析项目` | Hermes Agent |
-| `@kimi 重构模块` | Kimi Code |
-| `@openclaw 分析项目` | OpenClaw |
-| `@opencode 分析项目` | OpenCode |
-
-切换后后续消息默认发给该工具。
-
-### 文件传输
-
-**发送文件到微信：**
-```
-/send /path/to/file.py     ← 发送本地文件到微信
-```
-
-**接收微信文件：**
-- 直接在微信发送图片、文件、视频给 ClawBot
-- 自动下载并解密（微信 CDN 加密）
-- 保存到工作目录的 `.wx-media/` 文件夹
-- AI 可以直接读取和处理
-
-**AI 主动发送文件：**
-```
-[SEND_FILE: /path/to/result.png]
-```
-AI 输出此标记时，文件会自动发送到微信。
-
-### 工具接力
-
-```
-@claude 分析这个项目的架构
->> @codex 根据分析修复代码        ← Claude 输出作为 Codex 上下文
->> 继续优化                       ← 继续用 Codex
-@claude>codex 先分析再修复        ← 链式调用
-```
-
-### 恢复历史会话
-
-```
-/resume                          ← 列出所有历史会话 + 摘要
-/resume 3                        ← 恢复第 3 个
-/session set <uuid>              ← 从终端接续会话
-```
-
-### AskUserQuestion
-
-Claude Code 需要你做选择时，问题自动转发到微信：
-
-```
-你发: @claude 帮我新建项目
-
-微信收到:
-  Claude Code 需要你的回答:
-  ❓ What language?
-    1. Python
-    2. TypeScript
-    3. Rust
-
-你回复: 2
-→ Claude 继续执行
-```
-
-### 查看 AI 思考过程
-
-```
-/thoughts                        ← 开启/关闭思考内容显示
-```
-
-开启后，AI 的推理过程会单独发送到微信：
-
-```
-🤔 THINKING:
-让我分析一下这个问题...
-首先需要考虑...
-```
-
-### 消息模式
-
-```
-/msgmode verbose                 ← 详细模式：显示所有工具调用
-/msgmode normal                  ← 正常模式
-/msgmode compact                 ← 精简模式：合并输出
-```
-
-## 完整命令列表
-
-### 设置
-
-| 命令 | 作用 | 工具 |
-|---|---|---|
-| `/status` | 查看所有配置 | 通用 |
-| `/model <名>` | 切模型 | 所有 |
-| `/mode <auto\|safe\|plan>` | 权限模式 | 所有 |
-| `/msgmode <verbose\|normal\|compact>` | 消息模式 | 通用 |
-| `/thoughts` | 显示/隐藏思考内容 | 通用 |
-| `/effort <low\|med\|high\|max>` | 思考深度 | Claude |
-| `/turns <数>` | 最大轮次 | Claude |
-| `/budget <$>` | API 预算 | Claude |
-| `/dir <路径>` | 工作目录 | 通用 |
-| `/system <提示>` | 系统提示 | Claude |
-| `/tools <列表>` | 允许工具 | Claude |
-| `/notool <列表>` | 禁用工具 | Claude |
-| `/verbose` | 详细输出 | Claude |
-| `/bare` | 跳过配置加载 | Claude |
-| `/adddir <路径>` | 额外目录 | Claude/Codex |
-| `/name <名>` | 会话命名 | Claude |
-| `/sandbox <ro\|write\|full>` | 沙箱 | Codex |
-| `/search` | web 搜索 | Codex |
-| `/ephemeral` | 临时模式 | Codex |
-| `/profile <名>` | 配置 | Codex |
-| `/thinking` | 深度思考 | Kimi |
-| `/approval <模式>` | 审批模式 | Gemini |
-| `/include <目录>` | 上下文目录 | Gemini |
-| `/ext <名>` | Extensions | Gemini |
-
-### 操作
-
-| 命令 | 作用 |
-|---|---|
-| `/diff` | 查看 git 差异 |
-| `/commit` | 创建 git 提交 |
-| `/review` | 代码审查 |
-| `/plan [描述]` | 规划 / 切 plan 模式 |
-| `/init` | 创建项目配置文件 |
-| `/files` | 目录结构 |
-| `/compact` | 压缩上下文 |
-| `/stats` | 使用统计 |
-| `/send <路径>` | 发送文件到微信 |
-
-### 会话
-
-| 命令 | 作用 |
-|---|---|
-| `/new` | 新会话 |
-| `/clear` | 清除所有 |
-| `/cancel` | 取消任务 |
-| `/fork` | 分支会话 |
-| `/resume` | 浏览历史会话，选编号恢复 |
-| `/resume <编号\|uuid>` | 恢复指定会话 |
-| `/session` | 查看当前会话 ID |
-| `/session set <id>` | 跨通道漫游 |
-
-### 快捷
-
-| 命令 | 等效 |
-|---|---|
-| `/yolo` | mode=auto + effort=max |
-| `/fast` | effort=low |
-| `/reset` | 重置所有设置 |
-| `/cc` `/cx` `/gm` `/hm` `/km` `/claw` `/oc` | 快速切工具 |
-
-## 权限模式
-
-| 模式 | Claude | Codex | Gemini | Hermes | Kimi | OpenClaw | OpenCode |
-|---|---|---|---|---|---|---|---|
-| `auto` | `--dangerously-skip-permissions` | `--yolo` | `--approval-mode yolo` | `--yolo` | `--print` (自带) | `--local` | `--dangerously-skip-permissions` |
-| `safe` | 默认权限 | `--full-auto` | `--approval-mode default` | 默认 | 默认 | 默认 | — |
-| `plan` | `--permission-mode plan` | `--sandbox read-only` | `--approval-mode plan` | — | — | — | — |
+首次运行会显示二维码，用微信扫码登录 ClawBot。
 
 ## 配置
 
-`~/.wx-ai-bridge/config.json`：
+配置文件位于：
 
-```jsonc
+```text
+~/.wx-ai-bridge/config.json
+```
+
+可参考 [examples/config.local.example.json](examples/config.local.example.json)：
+
+```json
 {
-  "defaultTool": "claude",
-  "workDir": "/Users/you",
-  "cliTimeout": 300000,
+  "defaultTool": "lan",
+  "workDir": "D:\\Windows\\Default\\Documents\\wechat-workspace",
   "allowedUsers": [],
-  "tools": {
-    "claude": { "args": ["--max-turns", "50"] }
+  "remoteAgents": {
+    "lan": {
+      "displayName": "LAN Agent",
+      "endpoint": "http://192.168.1.50:8787/agent",
+      "apiKey": "change-me",
+      "timeout": 300000
+    }
+  },
+  "nasArchive": {
+    "enabled": true,
+    "path": "\\\\NAS\\wechat-inbox",
+    "organizeByDate": true,
+    "overwrite": false
   }
 }
 ```
 
-## 架构
+### 局域网 Agent
 
+`remoteAgents` 里的 key 就是微信里的 `@` 名称。上面的配置启用后，可以在微信里发送：
+
+```text
+@lan 总结一下这个文件
 ```
+
+远端服务需要实现一个 `POST /agent` JSON 接口。协议见 [examples/remote-agent-protocol.md](examples/remote-agent-protocol.md)，最小 FastAPI 示例见 [examples/remote-agent-fastapi.py](examples/remote-agent-fastapi.py)。
+
+启动示例远端 Agent：
+
+```bash
+cd examples
+pip install fastapi uvicorn pydantic
+LAN_AGENT_API_KEY=change-me uvicorn remote-agent-fastapi:app --host 0.0.0.0 --port 8787
+```
+
+### NAS 文件归档
+
+启用 `nasArchive` 后，微信发来的图片、文件、视频会同时保存到：
+
+- 桥接服务本地媒体目录
+- 指定 NAS 目录，例如 `\\NAS\wechat-inbox\2026-06-30\report.pdf`
+
+归档后的 `nasPath` 会传给本机 CLI 和远端 Agent，方便 NAS 上的 Agent 直接读取或后续自动化处理。
+
+Windows 推荐使用 UNC 路径：
+
+```json
+{
+  "nasArchive": {
+    "enabled": true,
+    "path": "\\\\192.168.1.10\\share\\wechat-inbox",
+    "organizeByDate": true,
+    "overwrite": false
+  }
+}
+```
+
+Linux/macOS 可先挂载 NAS，再填写挂载目录：
+
+```json
+{
+  "nasArchive": {
+    "enabled": true,
+    "path": "/mnt/nas/wechat-inbox"
+  }
+}
+```
+
+## 使用
+
+```text
+@lan 帮我分析刚发的 PDF
+@codex fix the bug
+@claude>lan 先分析项目，再交给局域网 Agent 生成报告
+>> 继续根据上一条结果处理
+/send D:\tmp\report.docx
+/status
+/help
+```
+
+发送微信文件时，消息会自动附带本地路径和 NAS 路径。AI 需要主动发文件回微信时，在输出中包含：
+
+```text
+[SEND_FILE: D:\tmp\result.png]
+```
+
+## 常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `/status` | 查看当前工具、模型、目录、会话 |
+| `/dir <路径>` | 设置工作目录 |
+| `/model <名>` | 设置模型 |
+| `/mode <auto\|safe\|plan>` | 设置权限模式 |
+| `/msgmode <verbose\|normal\|compact>` | 设置消息详细度 |
+| `/resume` | 浏览历史会话 |
+| `/new` | 新会话 |
+| `/cancel` | 取消当前任务 |
+| `/send <路径>` | 发送本地文件到微信 |
+
+## 开发
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+项目结构：
+
+```text
 src/
-├── index.ts              # 入口
-├── config.ts             # 配置
-├── ilink/                # 微信 iLink Bot API
-│   ├── types.ts          # 协议类型
-│   ├── auth.ts           # QR 扫码登录
-│   └── client.ts         # 长轮询 + 发消息 + typing + 发送队列
-├── adapters/             # CLI 工具适配器
-│   ├── base.ts           # 接口 + 共享 helpers (跨平台 spawn)
-│   ├── claude.ts         # Agent SDK + CLI 降级 + 流式消息
-│   ├── codex.ts          # codex exec + stdin 传参 + 媒体支持
-│   ├── gemini.ts         # gemini -p + stdin 传参 + 媒体支持
-│   ├── hermes.ts         # hermes chat -q -Q + 媒体支持
-│   ├── kimi.ts           # kimi --print + --thinking + 媒体支持
-│   ├── openclaw.ts       # openclaw agent --message --local + 媒体支持
-│   ├── opencode.ts       # opencode run --format json + thinking
-│   └── registry.ts       # 自动检测已安装工具
-├── utils/
-│   ├── logger.ts         # 日志
-│   ├── crypto.ts         # AES 加解密
-│   └── media.ts          # 媒体下载/解密/格式检测
-└── bridge/               # 桥接逻辑
-    ├── session.ts        # 会话持久化
-    ├── formatter.ts      # 响应格式化
-    └── router.ts         # @ 路由 + / 命令 + >> 接力 + 链式调用
-                          # + /resume 历史会话浏览
-                          # + AskUserQuestion 微信转发
-                          # + /msgmode /thoughts 命令
-                          # + 文件发送/接收路由
+  adapters/       AI CLI 和远端 HTTP Agent 适配器
+  bridge/         微信消息路由、会话、格式化
+  ilink/          iLink 登录、轮询、发送消息、媒体上传
+  utils/          日志、加解密、媒体下载、NAS 归档
+examples/         配置和远端 Agent 示例
+test/             Node test 测试
 ```
 
-## 支持的媒体格式
+## 安全建议
 
-自动解密微信 CDN 加密的媒体文件：
-
-- **图片**: JPEG, PNG, GIF, WEBP, BMP
-- **文档**: PDF, ZIP
-- **音视频**: MP4, MP3, SILK (微信语音)
-- **其他**: OLE (Office 文档)
-
-## 微信 iLink Bot API
-
-微信 2026 年 3 月推出的 ClawBot 插件官方 API：
-
-- 域名：`ilinkai.weixin.qq.com`（腾讯官方）
-- 认证：QR 扫码 → Bearer token
-- 收消息：HTTP 长轮询 (35s)
-- 发消息：POST + context_token
-- **官方通道，不封号**
-
-## 致谢
-
-- [sgaofen/cli-in-wechat](https://github.com/sgaofen/cli-in-wechat) - 原项目
-- [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) - Hermes Agent
-- [anomalyco/openclaw](https://github.com/anomalyco/openclaw) - OpenClaw
+- 生产使用时请配置 `allowedUsers`
+- 远端 Agent 建议设置 `apiKey`
+- NAS 共享目录建议使用专用目录和最小写权限
+- 不要提交 `~/.wx-ai-bridge/credentials.json`
+- `auto` 模式会给 CLI 较高权限，请只在可信环境使用
 
 ## License
 
 MIT
+
+## Acknowledgements
+
+- [liangminmx/cli-in-wechat](https://github.com/liangminmx/cli-in-wechat)
+- [sgaofen/cli-in-wechat](https://github.com/sgaofen/cli-in-wechat)
+- [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+- [anomalyco/openclaw](https://github.com/anomalyco/openclaw)

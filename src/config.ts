@@ -15,6 +15,21 @@ export interface ToolConfig {
   files?: string[];
 }
 
+export interface RemoteAgentConfig {
+  endpoint: string;
+  displayName?: string;
+  apiKey?: string;
+  headers?: Record<string, string>;
+  timeout?: number;
+}
+
+export interface NasArchiveConfig {
+  enabled: boolean;
+  path: string;
+  organizeByDate?: boolean;
+  overwrite?: boolean;
+}
+
 export interface BridgeConfig {
   defaultTool: string;
   maxResponseChunkSize: number;
@@ -23,6 +38,8 @@ export interface BridgeConfig {
   allowedUsers: string[];
   workDir: string;
   tools: Record<string, ToolConfig>;
+  remoteAgents: Record<string, RemoteAgentConfig>;
+  nasArchive: NasArchiveConfig;
 }
 
 const DEFAULT_CONFIG: BridgeConfig = {
@@ -33,6 +50,13 @@ const DEFAULT_CONFIG: BridgeConfig = {
   allowedUsers: [],          // empty = allow all
   workDir: process.cwd(),
   tools: {},
+  remoteAgents: {},
+  nasArchive: {
+    enabled: false,
+    path: '',
+    organizeByDate: true,
+    overwrite: false,
+  },
 };
 
 export function ensureDataDir(): void {
@@ -45,7 +69,14 @@ export function loadConfig(): BridgeConfig {
   if (!existsSync(CONFIG_FILE)) return { ...DEFAULT_CONFIG };
   try {
     const raw = readFileSync(CONFIG_FILE, 'utf-8');
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw) as Partial<BridgeConfig>;
+    return {
+      ...DEFAULT_CONFIG,
+      ...parsed,
+      tools: { ...DEFAULT_CONFIG.tools, ...(parsed.tools || {}) },
+      remoteAgents: { ...DEFAULT_CONFIG.remoteAgents, ...(parsed.remoteAgents || {}) },
+      nasArchive: { ...DEFAULT_CONFIG.nasArchive, ...(parsed.nasArchive || {}) },
+    };
   } catch {
     return { ...DEFAULT_CONFIG };
   }

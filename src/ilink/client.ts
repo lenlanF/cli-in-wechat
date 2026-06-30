@@ -4,7 +4,9 @@ import { basename } from 'node:path';
 import { generateWechatUin, encryptAesEcb, aesEcbPaddedSize, encodeMessageAesKey, md5 } from '../utils/crypto.js';
 import { log } from '../utils/logger.js';
 import { savePollCursor, loadPollCursor, saveContextTokens } from '../config.js';
+import type { BridgeConfig } from '../config.js';
 import { downloadImage, downloadFile, downloadVideo, type DownloadedMedia } from '../utils/media.js';
+import { archiveMediaToNas } from '../utils/nas.js';
 import type {
   Credentials,
   WeixinMessage,
@@ -52,10 +54,12 @@ export class ILinkClient {
   private rateLimitStates = new Map<string, UserRateLimitState>();
   private backoffMs = 1000;
   private abortController: AbortController | null = null;
+  private config?: BridgeConfig;
 
-  constructor(credentials: Credentials) {
+  constructor(credentials: Credentials, config?: BridgeConfig) {
     this.credentials = credentials;
     this.pollCursor = loadPollCursor();
+    this.config = config;
   }
 
   onMessage(handler: MessageHandler): void {
@@ -175,7 +179,7 @@ export class ILinkClient {
     saveContextTokens(this.contextTokens);
 
     log.debug(`[msg] item_list=${JSON.stringify(msg.item_list)}`);
-    const { text, refText, mediaItems } = await parseMessage(msg);
+    const { text, refText, mediaItems } = await parseMessage(msg, this.config);
     if (!text && !refText && mediaItems.length === 0) return;
 
     log.debug(`收到 [${msg.from_user_id.substring(0, 12)}...]: ${text.substring(0, 60)}${mediaItems.length > 0 ? ` (+${mediaItems.length} media)` : ''}`);
@@ -609,7 +613,7 @@ export class ILinkClient {
 
 // ─── Helpers ───────────────────────────────────────────────
 
-async function parseMessage(msg: WeixinMessage): Promise<{ text: string; refText: string; mediaItems: DownloadedMedia[] }> {
+async function parseMessage(msg: WeixinMessage, config?: BridgeConfig): Promise<{ text: string; refText: string; mediaItems: DownloadedMedia[] }> {
   const parts: string[] = [];
   let refText = '';
   const mediaItems: DownloadedMedia[] = [];
@@ -619,7 +623,7 @@ async function parseMessage(msg: WeixinMessage): Promise<{ text: string; refText
       parts.push(item.text_item.text);
     } else if (item.type === 2 && item.image_item) {
       try {
-        const media = await downloadImage(item.image_item);
+        const media = archiveMediaToNas(await downloadImage(item.image_item), config?.nasArchive);
         mediaItems.push(media);
         parts.push(`[图片: ${media.fileName}]`);
       } catch (err) {
@@ -630,7 +634,7 @@ async function parseMessage(msg: WeixinMessage): Promise<{ text: string; refText
       parts.push(item.voice_item.text); // voice-to-text transcription
     } else if (item.type === 4 && item.file_item) {
       try {
-        const media = await downloadFile(item.file_item);
+        const media = archiveMediaToNas(await downloadFile(item.file_item), config?.nasArchive);
         mediaItems.push(media);
         parts.push(`[文件: ${media.fileName}]`);
       } catch (err) {
@@ -639,7 +643,7 @@ async function parseMessage(msg: WeixinMessage): Promise<{ text: string; refText
       }
     } else if (item.type === 5 && item.video_item) {
       try {
-        const media = await downloadVideo(item.video_item);
+        const media = archiveMediaToNas(await downloadVideo(item.video_item), config?.nasArchive);
         mediaItems.push(media);
         parts.push(`[视频: ${media.fileName}]`);
       } catch (err) {

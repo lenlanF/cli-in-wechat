@@ -59,12 +59,24 @@ export class Router {
     return undefined;
   }
 
+  private resolveToolAlias(raw: string): string | undefined {
+    const lower = raw.toLowerCase();
+    const aliased = TOOL_ALIASES[lower] || lower;
+    return this.registry.isAvailable(aliased) ? aliased : undefined;
+  }
+
+  private getAvailableToolMentions(): string {
+    const builtIns = Object.keys(TOOL_ALIASES);
+    const configured = this.registry.getAvailableNames();
+    return Array.from(new Set([...builtIns, ...configured])).join(', ');
+  }
+
   // ── getCli: determine terminal from @mention → ref footer → current session ──
   private getCli(uid: string, text: string, refText?: string): string {
     const atMatch = text.match(/^@(\w+)/);
     if (atMatch) {
-      const resolved = TOOL_ALIASES[atMatch[1].toLowerCase()];
-      if (resolved && this.registry.isAvailable(resolved)) return resolved;
+      const resolved = this.resolveToolAlias(atMatch[1]);
+      if (resolved) return resolved;
     }
     if (refText) {
       const resolved = this.resolveToolFromRefText(refText);
@@ -167,7 +179,8 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     if (media && media.length > 0) {
       const mediaInfo = media.map(m => {
         const typeNames: Record<string, string> = { image: '图片', file: '文件', video: '视频' };
-        return `${typeNames[m.type] || '媒体'}: ${m.fileName} (${m.path})`;
+        const nasInfo = m.nasPath ? `\nNAS: ${m.nasPath}` : '';
+        return `${typeNames[m.type] || '媒体'}: ${m.fileName} (${m.path})${nasInfo}`;
       });
       mediaContext = `\n\n[收到媒体文件]\n${mediaInfo.join('\n')}`;
     }
@@ -183,10 +196,10 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     // Pattern: @tool1>tool2 prompt  →  chain: tool1 processes, output feeds tool2
     const chainMatch = trimmed.match(/^@(\w+)>(\w+)\s+([\s\S]+)$/);
     if (chainMatch) {
-      const t1 = TOOL_ALIASES[chainMatch[1].toLowerCase()];
-      const t2 = TOOL_ALIASES[chainMatch[2].toLowerCase()];
+      const t1 = this.resolveToolAlias(chainMatch[1]);
+      const t2 = this.resolveToolAlias(chainMatch[2]);
       const prompt = chainMatch[3].trim();
-      if (t1 && t2 && this.registry.isAvailable(t1) && this.registry.isAvailable(t2)) {
+      if (t1 && t2) {
         const busy = [t1, t2].find(t => this.active.has(`${uid}:${t}`));
         if (busy) { await this.ilink.sendText(uid, `${busy} 在忙`); return; }
         await this.chain(uid, t1, t2, prompt + mediaContext, media);
@@ -214,8 +227,8 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
 
     // ── @mention 合法性校验 ──
     const atMatch = trimmed.match(/^@(\w+)(?:[\s：:]\s*([\s\S]+))?$/);
-    if (atMatch && !TOOL_ALIASES[atMatch[1].toLowerCase()]) {
-      await this.ilink.sendText(uid, `未知终端: @${atMatch[1]}\n可用: ${Object.keys(TOOL_ALIASES).join(', ')}`);
+    if (atMatch && !this.resolveToolAlias(atMatch[1])) {
+      await this.ilink.sendText(uid, `未知终端: @${atMatch[1]}\n可用: ${this.getAvailableToolMentions()}`);
       return;
     }
 

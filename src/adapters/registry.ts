@@ -7,13 +7,15 @@ import { HermesAdapter } from './hermes.js';
 import { KimiAdapter } from './kimi.js';
 import { OpenClawAdapter } from './openclaw.js';
 import { OpenCodeAdapter } from './opencode.js';
+import { RemoteHttpAgentAdapter } from './remote-http.js';
+import type { BridgeConfig } from '../config.js';
 
 export class AdapterRegistry {
   private adapters = new Map<string, CLIAdapter>();
   private available = new Set<string>();
   private byDisplayName = new Map<string, string>(); // displayName → name
 
-  constructor() {
+  constructor(config?: BridgeConfig) {
     this.register(new ClaudeAdapter());
     this.register(new CodexAdapter());
     this.register(new GeminiAdapter());
@@ -21,6 +23,14 @@ export class AdapterRegistry {
     this.register(new KimiAdapter());
     this.register(new OpenClawAdapter());
     this.register(new OpenCodeAdapter());
+
+    for (const [name, agent] of Object.entries(config?.remoteAgents || {})) {
+      this.register(new RemoteHttpAgentAdapter(
+        name,
+        agent.displayName || name,
+        agent,
+      ));
+    }
   }
 
   private register(adapter: CLIAdapter): void {

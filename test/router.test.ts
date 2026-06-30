@@ -21,12 +21,12 @@ function createRouter() {
   };
 
   const registry = {
-    isAvailable: (name: string) => ['claude', 'codex', 'gemini'].includes(name),
+    isAvailable: (name: string) => ['claude', 'codex', 'gemini', 'lan'].includes(name),
     getNameByDisplayName: (displayName: string) => ({ Claude: 'claude', Codex: 'codex', Gemini: 'gemini' }[displayName]),
-    getAvailableNames: () => ['claude', 'codex', 'gemini'],
+    getAvailableNames: () => ['claude', 'codex', 'gemini', 'lan'],
     get: (name: string) => ({
       name,
-      displayName: name === 'claude' ? 'Claude' : name === 'codex' ? 'Codex' : 'Gemini',
+      displayName: name === 'claude' ? 'Claude' : name === 'codex' ? 'Codex' : name === 'lan' ? 'LAN Agent' : 'Gemini',
       capabilities: { sessionResume: false },
     }),
   };
@@ -50,6 +50,13 @@ function createRouter() {
     allowedUsers: [],
     workDir: process.cwd(),
     tools: {},
+    remoteAgents: {},
+    nasArchive: {
+      enabled: false,
+      path: '',
+      organizeByDate: true,
+      overwrite: false,
+    },
   };
 
   const router = new Router(ilink as any, registry as any, sessions as any, config);
@@ -119,6 +126,21 @@ test('handle() rejects unknown @tool mention', async () => {
   await router.handle(makeMessage('u1'), '@unknown hello', '');
 
   assert.ok(messages[0].text.includes('未知终端: @unknown'));
+});
+
+test('handle() accepts configured remote agent mentions', async () => {
+  const { router } = createRouter();
+  let capturedTool = '';
+  let capturedPrompt = '';
+  router.exec = async (_uid: string, tool: string, prompt: string) => {
+    capturedTool = tool;
+    capturedPrompt = prompt;
+  };
+
+  await router.handle(makeMessage('u1'), '@lan hello from wechat', '');
+
+  assert.equal(capturedTool, 'lan');
+  assert.equal(capturedPrompt, 'hello from wechat');
 });
 
 test('handle() combines prompt and refText with double newline', async () => {

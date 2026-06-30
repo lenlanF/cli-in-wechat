@@ -21,7 +21,11 @@ body:
         - Codex CLI
         - Gemini CLI
         - Kimi Code
-        - Aider
+        - Hermes Agent
+        - OpenClaw
+        - OpenCode
+        - LAN Remote Agent
+        - NAS archive
         - Bridge 本身
     validations:
       required: true

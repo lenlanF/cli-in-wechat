@@ -39,7 +39,7 @@ async function main() {
   // ─── 1. Detect CLI tools ─────────────────────────────
 
   log.info('检测已安装的 CLI 工具...');
-  const registry = new AdapterRegistry();
+  const registry = new AdapterRegistry(config);
   await registry.detectAvailable();
 
   const available = registry.getAvailableNames();
@@ -86,7 +86,7 @@ async function main() {
 
   // ─── 3. Start bridge ─────────────────────────────────
 
-  const ilink = new ILinkClient(credentials);
+  const ilink = new ILinkClient(credentials, config);
   const sessions = new SessionManager();
   const router = new Router(ilink, registry, sessions, config);
 

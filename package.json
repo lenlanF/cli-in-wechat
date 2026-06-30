@@ -1,7 +1,7 @@
 {
   "name": "cli-in-wechat",
   "version": "0.1.0",
-  "description": "Run Claude Code, Codex, Gemini, Kimi, OpenCode in WeChat via iLink Bot API",
+  "description": "Use WeChat to run local AI CLIs, LAN agents, and archive files to NAS via iLink Bot API",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -14,7 +14,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.81",
@@ -29,5 +29,23 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "keywords": [
+    "wechat",
+    "clawbot",
+    "ilink",
+    "ai-agent",
+    "codex",
+    "claude",
+    "nas",
+    "lan"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lenlanF/cli-in-wechat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lenlanF/cli-in-wechat/issues"
+  },
+  "homepage": "https://github.com/lenlanF/cli-in-wechat#readme",
   "license": "MIT"
 }
