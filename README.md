@@ -103,6 +103,20 @@ pip install fastapi uvicorn pydantic
 LAN_AGENT_API_KEY=change-me uvicorn remote-agent-fastapi:app --host 0.0.0.0 --port 8787
 ```
 
+### 多机器 Codex
+
+如果机器 A 是 Linux 且有 Codex CLI，机器 B 是 Windows 且也有 Codex CLI，推荐只让 B 运行 `cli-in-wechat` 作为微信入口：
+
+```text
+微信
+  -> B / Windows: cli-in-wechat
+       @codex  -> B 本机 Codex
+       @codexa -> A / Linux HTTP Agent -> A 本机 Codex
+       文件    -> B 下载 -> NAS 指定目录
+```
+
+A 上启动 HTTP Agent wrapper，B 上把它配置成 `remoteAgents.codexa`。完整步骤见 [examples/multi-machine-codex.md](examples/multi-machine-codex.md)，Codex wrapper 示例见 [examples/codex-http-agent.py](examples/codex-http-agent.py)。
+
 ### 本机自定义 Agent / CLI
 
 `localAgents` 可以把本机任意命令行工具注册成微信 `@名称`。协议见 [examples/local-agent.md](examples/local-agent.md)。

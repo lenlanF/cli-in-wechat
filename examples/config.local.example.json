@@ -13,6 +13,12 @@
     "nasbot": {
       "displayName": "NAS Agent",
       "endpoint": "http://192.168.1.60:8787/agent"
+    },
+    "codexa": {
+      "displayName": "Codex on Linux A",
+      "endpoint": "http://192.168.1.50:8787/agent",
+      "apiKey": "change-me",
+      "timeout": 300000
     }
   },
   "localAgents": {
