@@ -23,6 +23,18 @@ export interface RemoteAgentConfig {
   timeout?: number;
 }
 
+export interface LocalAgentConfig {
+  command: string;
+  displayName?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  promptMode?: 'stdin' | 'arg' | 'template';
+  promptArg?: string;
+  shell?: boolean;
+  timeout?: number;
+}
+
 export interface NasArchiveConfig {
   enabled: boolean;
   path: string;
@@ -39,6 +51,7 @@ export interface BridgeConfig {
   workDir: string;
   tools: Record<string, ToolConfig>;
   remoteAgents: Record<string, RemoteAgentConfig>;
+  localAgents: Record<string, LocalAgentConfig>;
   nasArchive: NasArchiveConfig;
 }
 
@@ -51,6 +64,7 @@ const DEFAULT_CONFIG: BridgeConfig = {
   workDir: process.cwd(),
   tools: {},
   remoteAgents: {},
+  localAgents: {},
   nasArchive: {
     enabled: false,
     path: '',
@@ -75,6 +89,7 @@ export function loadConfig(): BridgeConfig {
       ...parsed,
       tools: { ...DEFAULT_CONFIG.tools, ...(parsed.tools || {}) },
       remoteAgents: { ...DEFAULT_CONFIG.remoteAgents, ...(parsed.remoteAgents || {}) },
+      localAgents: { ...DEFAULT_CONFIG.localAgents, ...(parsed.localAgents || {}) },
       nasArchive: { ...DEFAULT_CONFIG.nasArchive, ...(parsed.nasArchive || {}) },
     };
   } catch {

@@ -15,9 +15,24 @@
       "endpoint": "http://192.168.1.60:8787/agent"
     }
   },
+  "localAgents": {
+    "localpy": {
+      "displayName": "Local Python Agent",
+      "command": "python",
+      "args": ["examples/local-agent-echo.py"],
+      "promptMode": "stdin",
+      "timeout": 300000
+    },
+    "ollama": {
+      "displayName": "Ollama Local",
+      "command": "ollama",
+      "args": ["run", "qwen2.5-coder:7b"],
+      "promptMode": "stdin"
+    }
+  },
   "nasArchive": {
     "enabled": true,
-    "path": "\\\\NAS\\wechat-inbox",
+    "path": "\\\\NAS01\\wechat-inbox\\project-a",
     "organizeByDate": true,
     "overwrite": false
   },

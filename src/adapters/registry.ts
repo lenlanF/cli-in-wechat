@@ -7,6 +7,7 @@ import { HermesAdapter } from './hermes.js';
 import { KimiAdapter } from './kimi.js';
 import { OpenClawAdapter } from './openclaw.js';
 import { OpenCodeAdapter } from './opencode.js';
+import { LocalAgentAdapter } from './local-agent.js';
 import { RemoteHttpAgentAdapter } from './remote-http.js';
 import type { BridgeConfig } from '../config.js';
 
@@ -28,6 +29,15 @@ export class AdapterRegistry {
       this.register(new RemoteHttpAgentAdapter(
         name,
         agent.displayName || name,
+        agent,
+      ));
+    }
+
+    for (const [name, agent] of Object.entries(config?.localAgents || {})) {
+      this.register(new LocalAgentAdapter(
+        name,
+        agent.displayName || name,
+        agent.command,
         agent,
       ));
     }

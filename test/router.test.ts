@@ -51,6 +51,7 @@ function createRouter() {
     workDir: process.cwd(),
     tools: {},
     remoteAgents: {},
+    localAgents: {},
     nasArchive: {
       enabled: false,
       path: '',

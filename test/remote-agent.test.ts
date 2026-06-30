@@ -19,6 +19,7 @@ function createConfig(): BridgeConfig {
         endpoint: 'http://127.0.0.1:8787/agent',
       },
     },
+    localAgents: {},
     nasArchive: {
       enabled: false,
       path: '',
@@ -35,5 +36,23 @@ test('AdapterRegistry registers configured remote HTTP agents', async () => {
   assert.equal(adapter?.name, 'lan');
   assert.equal(adapter?.displayName, 'LAN Agent');
   assert.equal(adapter?.capabilities.sessionResume, true);
+  assert.equal(await adapter?.isAvailable(), true);
+});
+
+test('AdapterRegistry registers configured local CLI agents', async () => {
+  const config = createConfig();
+  config.localAgents = {
+    nodeecho: {
+      displayName: 'Node Echo',
+      command: 'node',
+      args: ['-e', 'process.stdin.pipe(process.stdout)'],
+      promptMode: 'stdin',
+    },
+  };
+  const registry = new AdapterRegistry(config);
+  const adapter = registry.get('nodeecho');
+
+  assert.equal(adapter?.name, 'nodeecho');
+  assert.equal(adapter?.displayName, 'Node Echo');
   assert.equal(await adapter?.isAvailable(), true);
 });

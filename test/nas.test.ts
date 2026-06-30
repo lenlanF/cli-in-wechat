@@ -45,3 +45,29 @@ test('archiveMediaToNas copies media and avoids overwriting same-name files', ()
   assert.equal(readFileSync(first.nasPath!, 'utf-8'), 'first');
   assert.equal(readFileSync(second.nasPath!, 'utf-8'), 'second');
 });
+
+test('archiveMediaToNas supports a specified NAS device and folder path', () => {
+  const root = mkdtempSync(join(tmpdir(), 'wx-nas-device-'));
+  const sourceDir = join(root, 'source');
+  const nasDeviceFolder = join(root, 'NAS01', 'wechat-inbox', 'project-a');
+  const sourcePath = join(sourceDir, 'image.png');
+
+  mkdirSync(sourceDir, { recursive: true });
+  writeFileSync(sourcePath, 'png-bytes');
+
+  const archived = archiveMediaToNas({
+    type: 'image',
+    path: sourcePath,
+    fileName: 'image.png',
+    size: 9,
+  }, {
+    enabled: true,
+    path: nasDeviceFolder,
+    organizeByDate: false,
+    overwrite: false,
+  });
+
+  assert.ok(archived.nasPath?.startsWith(nasDeviceFolder));
+  assert.ok(archived.nasPath?.endsWith('image.png'));
+  assert.equal(readFileSync(archived.nasPath!, 'utf-8'), 'png-bytes');
+});

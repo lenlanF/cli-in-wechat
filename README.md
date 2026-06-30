@@ -10,6 +10,7 @@
 - Claude Code / Codex CLI / Gemini CLI / Hermes Agent / Kimi Code / OpenClaw / OpenCode
 - `@工具名` 切换工具，支持 `@tool1>tool2` 链式调用和 `>>` 接力
 - `remoteAgents`：通过 HTTP JSON 调用同局域网其他设备上的 AI Agent
+- `localAgents`：把本机任意 CLI/Agent 注册成微信里的自定义 `@名称`
 - 微信图片、文件、视频自动下载并解密
 - `nasArchive`：微信文件自动复制到指定 NAS 目录，默认按日期归档并避免覆盖
 - 会话续接、`/resume`、`/session set <id>`
@@ -22,6 +23,7 @@
   <-> iLink Bot API
 cli-in-wechat 桥接服务
   <-> 本机 AI CLI: claude / codex / gemini / hermes / kimi / openclaw / opencode
+  <-> 自定义本机 Agent: @ollama / @localpy / 自定义名称
   <-> 局域网 HTTP Agent: @lan / @nasbot / 自定义名称
   <-> NAS 共享目录: \\NAS\wechat-inbox
 ```
@@ -66,6 +68,14 @@ npm run dev
       "timeout": 300000
     }
   },
+  "localAgents": {
+    "ollama": {
+      "displayName": "Ollama Local",
+      "command": "ollama",
+      "args": ["run", "qwen2.5-coder:7b"],
+      "promptMode": "stdin"
+    }
+  },
   "nasArchive": {
     "enabled": true,
     "path": "\\\\NAS\\wechat-inbox",
@@ -93,12 +103,37 @@ pip install fastapi uvicorn pydantic
 LAN_AGENT_API_KEY=change-me uvicorn remote-agent-fastapi:app --host 0.0.0.0 --port 8787
 ```
 
+### 本机自定义 Agent / CLI
+
+`localAgents` 可以把本机任意命令行工具注册成微信 `@名称`。协议见 [examples/local-agent.md](examples/local-agent.md)。
+
+例如：
+
+```json
+{
+  "localAgents": {
+    "localpy": {
+      "displayName": "Local Python Agent",
+      "command": "python",
+      "args": ["examples/local-agent-echo.py"],
+      "promptMode": "stdin"
+    }
+  }
+}
+```
+
+微信里发送：
+
+```text
+@localpy 你好，读取刚才的文件
+```
+
 ### NAS 文件归档
 
 启用 `nasArchive` 后，微信发来的图片、文件、视频会同时保存到：
 
 - 桥接服务本地媒体目录
-- 指定 NAS 目录，例如 `\\NAS\wechat-inbox\2026-06-30\report.pdf`
+- 指定 NAS 设备和文件夹，例如 `\\NAS01\wechat-inbox\project-a\2026-06-30\report.pdf`
 
 归档后的 `nasPath` 会传给本机 CLI 和远端 Agent，方便 NAS 上的 Agent 直接读取或后续自动化处理。
 
@@ -108,12 +143,14 @@ Windows 推荐使用 UNC 路径：
 {
   "nasArchive": {
     "enabled": true,
-    "path": "\\\\192.168.1.10\\share\\wechat-inbox",
+    "path": "\\\\192.168.1.10\\share\\wechat-inbox\\project-a",
     "organizeByDate": true,
     "overwrite": false
   }
 }
 ```
+
+这里的 `path` 就是“指定设备 + 指定文件夹”。可用 NAS 主机名，例如 `\\\\NAS01\\wechat-inbox\\project-a`，也可用 IP，例如 `\\\\192.168.1.10\\share\\wechat-inbox\\project-a`。
 
 Linux/macOS 可先挂载 NAS，再填写挂载目录：
 
@@ -130,6 +167,7 @@ Linux/macOS 可先挂载 NAS，再填写挂载目录：
 
 ```text
 @lan 帮我分析刚发的 PDF
+@localpy 处理刚收到的文件
 @codex fix the bug
 @claude>lan 先分析项目，再交给局域网 Agent 生成报告
 >> 继续根据上一条结果处理
