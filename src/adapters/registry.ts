@@ -25,6 +25,10 @@ export class AdapterRegistry {
     this.register(new OpenClawAdapter());
     this.register(new OpenCodeAdapter());
 
+    this.registerConfiguredAgents(config);
+  }
+
+  registerConfiguredAgents(config?: BridgeConfig): void {
     for (const [name, agent] of Object.entries(config?.remoteAgents || {})) {
       this.register(new RemoteHttpAgentAdapter(
         name,
@@ -43,9 +47,21 @@ export class AdapterRegistry {
     }
   }
 
-  private register(adapter: CLIAdapter): void {
+  register(adapter: CLIAdapter): void {
     this.adapters.set(adapter.name, adapter);
     this.byDisplayName.set(adapter.displayName, adapter.name);
+  }
+
+  unregister(name: string): void {
+    const adapter = this.adapters.get(name);
+    if (adapter) this.byDisplayName.delete(adapter.displayName);
+    this.adapters.delete(name);
+    this.available.delete(name);
+  }
+
+  setAvailable(name: string, available: boolean): void {
+    if (available) this.available.add(name);
+    else this.available.delete(name);
   }
 
   getNameByDisplayName(displayName: string): string | undefined {

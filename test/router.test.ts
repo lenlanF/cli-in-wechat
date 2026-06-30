@@ -24,6 +24,9 @@ function createRouter() {
     isAvailable: (name: string) => ['claude', 'codex', 'gemini', 'lan'].includes(name),
     getNameByDisplayName: (displayName: string) => ({ Claude: 'claude', Codex: 'codex', Gemini: 'gemini' }[displayName]),
     getAvailableNames: () => ['claude', 'codex', 'gemini', 'lan'],
+    register: () => {},
+    unregister: () => {},
+    setAvailable: () => {},
     get: (name: string) => ({
       name,
       displayName: name === 'claude' ? 'Claude' : name === 'codex' ? 'Codex' : name === 'lan' ? 'LAN Agent' : 'Gemini',
@@ -61,6 +64,7 @@ function createRouter() {
   };
 
   const router = new Router(ilink as any, registry as any, sessions as any, config);
+  (router as any).persistConfig = () => {};
   return { router: router as any, messages, starts, sessions };
 }
 
@@ -166,6 +170,57 @@ test('handle() omits refText in combined prompt if refText is empty', async () =
   await router.handle(makeMessage('u1'), 'explain', '');
 
   assert.equal(capturedPrompt, 'explain');
+});
+
+test('handleSlash /nas path enables NAS archive and stores target folder', async () => {
+  const { router, messages } = createRouter();
+
+  await router.handleSlash('u1', '/nas path \\\\NAS01\\wechat-inbox\\project-a');
+
+  assert.equal(router.config.nasArchive.enabled, true);
+  assert.equal(router.config.nasArchive.path, '\\\\NAS01\\wechat-inbox\\project-a');
+  assert.ok(messages[messages.length - 1]?.text.includes('nasArchive → ON'));
+});
+
+test('handleSlash /remote set stores custom LAN agent config', async () => {
+  const { router, messages } = createRouter();
+  let registeredName = '';
+  router.registry.register = (adapter: any) => {
+    registeredName = adapter.name;
+  };
+  router.registry.setAvailable = () => {};
+
+  await router.handleSlash('u1', '/remote set codexa {"endpoint":"http://192.168.1.50:8787/agent","apiKey":"secret","displayName":"Codex A"}');
+
+  assert.equal(router.config.remoteAgents.codexa.endpoint, 'http://192.168.1.50:8787/agent');
+  assert.equal(router.config.remoteAgents.codexa.apiKey, 'secret');
+  assert.equal(registeredName, 'codexa');
+  assert.ok(messages[messages.length - 1]?.text.includes('remoteAgents.codexa'));
+});
+
+test('handleSlash /local set stores custom local CLI agent config', async () => {
+  const { router, messages } = createRouter();
+  let registeredName = '';
+  router.registry.register = (adapter: any) => {
+    registeredName = adapter.name;
+  };
+  router.registry.setAvailable = () => {};
+
+  await router.handleSlash('u1', '/local set ollama {"command":"ollama","args":["run","qwen"],"promptMode":"stdin"}');
+
+  assert.equal(router.config.localAgents.ollama.command, 'ollama');
+  assert.deepEqual(router.config.localAgents.ollama.args, ['run', 'qwen']);
+  assert.equal(registeredName, 'ollama');
+  assert.ok(messages[messages.length - 1]?.text.includes('localAgents.ollama'));
+});
+
+test('handleSlash /allow add stores current user by default', async () => {
+  const { router, messages } = createRouter();
+
+  await router.handleSlash('u1', '/allow add');
+
+  assert.deepEqual(router.config.allowedUsers, ['u1']);
+  assert.ok(messages[messages.length - 1]?.text.includes('allowedUsers + u1'));
 });
 
 test('handleSlash /model strips accidental /. suffix from model name', async () => {

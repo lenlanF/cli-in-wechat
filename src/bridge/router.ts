@@ -5,10 +5,12 @@ import { execSync } from 'node:child_process';
 import { log } from '../utils/logger.js';
 import { ILinkClient } from '../ilink/client.js';
 import { AdapterRegistry } from '../adapters/registry.js';
+import { LocalAgentAdapter } from '../adapters/local-agent.js';
+import { RemoteHttpAgentAdapter } from '../adapters/remote-http.js';
 import { SessionManager } from './session.js';
 import { formatResponse } from './formatter.js';
 import type { WeixinMessage } from '../ilink/types.js';
-import type { BridgeConfig } from '../config.js';
+import { saveConfig, type BridgeConfig, type LocalAgentConfig, type RemoteAgentConfig } from '../config.js';
 import { DEFAULT_SETTINGS, type AskUserRequest, type MsgMode } from '../adapters/base.js';
 import type { DownloadedMedia } from '../utils/media.js';
 
@@ -38,6 +40,7 @@ export class Router {
   private lastResponse = new Map<string, { tool: string; text: string }>();
   private pendingQuestions = new Map<string, PendingQuestion>();
   private _lastSessionList: Array<{ id: string; date: string; summary: string }> | null = null;
+  private persistConfig: (config: BridgeConfig) => void = saveConfig;
 
   constructor(ilink: ILinkClient, registry: AdapterRegistry, sessions: SessionManager, config: BridgeConfig) {
     this.ilink = ilink;
@@ -167,6 +170,221 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     return true;
   }
 
+  private isConfigAdmin(uid: string): boolean {
+    return this.config.allowedUsers.length === 0 || this.config.allowedUsers.includes(uid);
+  }
+
+  private saveBridgeConfig(): void {
+    this.persistConfig(this.config);
+  }
+
+  private parseJsonArg<T>(raw: string): T | null {
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private async registerRemoteAgent(name: string, agent: RemoteAgentConfig): Promise<boolean> {
+    this.config.remoteAgents[name] = agent;
+    const adapter = new RemoteHttpAgentAdapter(name, agent.displayName || name, agent);
+    this.registry.register(adapter);
+    this.registry.setAvailable(name, await adapter.isAvailable());
+    this.saveBridgeConfig();
+    return this.registry.isAvailable(name);
+  }
+
+  private async registerLocalAgent(name: string, agent: LocalAgentConfig): Promise<boolean> {
+    this.config.localAgents[name] = agent;
+    const adapter = new LocalAgentAdapter(name, agent.displayName || name, agent.command, agent);
+    this.registry.register(adapter);
+    this.registry.setAvailable(name, await adapter.isAvailable());
+    this.saveBridgeConfig();
+    return this.registry.isAvailable(name);
+  }
+
+  private async handleConfigCommand(uid: string, cmd: string, arg: string, reply: (msg: string) => Promise<void>): Promise<boolean> {
+    if (!this.isConfigAdmin(uid)) {
+      await reply('无权限修改配置');
+      return true;
+    }
+
+    const [sub = '', ...restParts] = arg.split(/\s+/);
+    const rest = restParts.join(' ').trim();
+
+    if (cmd === 'config') {
+      switch (sub.toLowerCase()) {
+        case '':
+        case 'show':
+          await reply([
+            `defaultTool: ${this.config.defaultTool}`,
+            `workDir: ${this.config.workDir}`,
+            `allowedUsers: ${this.config.allowedUsers.length ? this.config.allowedUsers.join(', ') : '(all)'}`,
+            `remoteAgents: ${Object.keys(this.config.remoteAgents).join(', ') || '(none)'}`,
+            `localAgents: ${Object.keys(this.config.localAgents).join(', ') || '(none)'}`,
+            `nasArchive: ${this.config.nasArchive.enabled ? 'ON' : 'OFF'}`,
+            `nasPath: ${this.config.nasArchive.path || '(none)'}`,
+          ].join('\n'));
+          return true;
+        case 'default':
+          if (!rest) { await reply('/config default <tool>'); return true; }
+          this.config.defaultTool = rest;
+          this.saveBridgeConfig();
+          await reply(`defaultTool → ${rest}`);
+          return true;
+        case 'workdir':
+          if (!rest) { await reply('/config workdir <path>'); return true; }
+          this.config.workDir = rest;
+          this.saveBridgeConfig();
+          await reply(`workDir → ${rest}`);
+          return true;
+        default:
+          await reply('/config show\n/config default <tool>\n/config workdir <path>');
+          return true;
+      }
+    }
+
+    if (cmd === 'allow') {
+      const op = sub.toLowerCase();
+      if (!op || op === 'list') {
+        await reply(`allowedUsers: ${this.config.allowedUsers.length ? this.config.allowedUsers.join('\n') : '(all users)'}`);
+        return true;
+      }
+      if (op === 'add') {
+        const id = rest || uid;
+        if (!this.config.allowedUsers.includes(id)) this.config.allowedUsers.push(id);
+        this.saveBridgeConfig();
+        await reply(`allowedUsers + ${id}`);
+        return true;
+      }
+      if (op === 'remove' || op === 'del') {
+        const id = rest || uid;
+        this.config.allowedUsers = this.config.allowedUsers.filter((item) => item !== id);
+        this.saveBridgeConfig();
+        await reply(`allowedUsers - ${id}`);
+        return true;
+      }
+      if (op === 'clear') {
+        this.config.allowedUsers = [];
+        this.saveBridgeConfig();
+        await reply('allowedUsers 已清空，当前允许所有用户');
+        return true;
+      }
+      await reply('/allow list\n/allow add [userId]\n/allow remove <userId>\n/allow clear');
+      return true;
+    }
+
+    if (cmd === 'nas') {
+      const op = sub.toLowerCase();
+      if (!op || op === 'show') {
+        await reply([
+          `enabled: ${this.config.nasArchive.enabled}`,
+          `path: ${this.config.nasArchive.path || '(none)'}`,
+          `organizeByDate: ${this.config.nasArchive.organizeByDate !== false}`,
+          `overwrite: ${!!this.config.nasArchive.overwrite}`,
+        ].join('\n'));
+        return true;
+      }
+      if (op === 'on' || op === 'enable') {
+        this.config.nasArchive.enabled = true;
+        this.saveBridgeConfig();
+        await reply('nasArchive → ON');
+        return true;
+      }
+      if (op === 'off' || op === 'disable') {
+        this.config.nasArchive.enabled = false;
+        this.saveBridgeConfig();
+        await reply('nasArchive → OFF');
+        return true;
+      }
+      if (op === 'path') {
+        if (!rest) { await reply('/nas path <UNC或挂载路径>'); return true; }
+        this.config.nasArchive.path = rest;
+        this.config.nasArchive.enabled = true;
+        this.saveBridgeConfig();
+        await reply(`nasPath → ${rest}\nnasArchive → ON`);
+        return true;
+      }
+      if (op === 'date') {
+        const v = rest.toLowerCase();
+        this.config.nasArchive.organizeByDate = !(v === 'off' || v === 'false' || v === '0');
+        this.saveBridgeConfig();
+        await reply(`organizeByDate → ${this.config.nasArchive.organizeByDate}`);
+        return true;
+      }
+      if (op === 'overwrite') {
+        const v = rest.toLowerCase();
+        this.config.nasArchive.overwrite = v === 'on' || v === 'true' || v === '1';
+        this.saveBridgeConfig();
+        await reply(`overwrite → ${!!this.config.nasArchive.overwrite}`);
+        return true;
+      }
+      await reply('/nas show\n/nas path <path>\n/nas on|off\n/nas date on|off\n/nas overwrite on|off');
+      return true;
+    }
+
+    if (cmd === 'remote') {
+      const op = sub.toLowerCase();
+      if (!op || op === 'list') {
+        const names = Object.entries(this.config.remoteAgents).map(([name, agent]) => `${name}: ${agent.endpoint}`);
+        await reply(names.join('\n') || '(no remote agents)');
+        return true;
+      }
+      if (op === 'remove' || op === 'del') {
+        const name = rest;
+        if (!name) { await reply('/remote remove <name>'); return true; }
+        delete this.config.remoteAgents[name];
+        this.registry.unregister(name);
+        this.saveBridgeConfig();
+        await reply(`remoteAgents - ${name}`);
+        return true;
+      }
+      if (op === 'set') {
+        const match = rest.match(/^(\w+)\s+([\s\S]+)$/);
+        if (!match) { await reply('/remote set <name> {"endpoint":"http://ip:8787/agent","apiKey":"..."}'); return true; }
+        const agent = this.parseJsonArg<RemoteAgentConfig>(match[2]);
+        if (!agent?.endpoint) { await reply('remote JSON 需要 endpoint'); return true; }
+        const available = await this.registerRemoteAgent(match[1], agent);
+        await reply(`remoteAgents.${match[1]} → ${agent.endpoint}\n可用: ${available ? 'YES' : 'NO'}`);
+        return true;
+      }
+      await reply('/remote list\n/remote set <name> <json>\n/remote remove <name>');
+      return true;
+    }
+
+    if (cmd === 'local') {
+      const op = sub.toLowerCase();
+      if (!op || op === 'list') {
+        const names = Object.entries(this.config.localAgents).map(([name, agent]) => `${name}: ${agent.command} ${(agent.args || []).join(' ')}`);
+        await reply(names.join('\n') || '(no local agents)');
+        return true;
+      }
+      if (op === 'remove' || op === 'del') {
+        const name = rest;
+        if (!name) { await reply('/local remove <name>'); return true; }
+        delete this.config.localAgents[name];
+        this.registry.unregister(name);
+        this.saveBridgeConfig();
+        await reply(`localAgents - ${name}`);
+        return true;
+      }
+      if (op === 'set') {
+        const match = rest.match(/^(\w+)\s+([\s\S]+)$/);
+        if (!match) { await reply('/local set <name> {"command":"ollama","args":["run","qwen"],"promptMode":"stdin"}'); return true; }
+        const agent = this.parseJsonArg<LocalAgentConfig>(match[2]);
+        if (!agent?.command) { await reply('local JSON 需要 command'); return true; }
+        const available = await this.registerLocalAgent(match[1], agent);
+        await reply(`localAgents.${match[1]} → ${agent.command}\n可用: ${available ? 'YES' : 'NO'}`);
+        return true;
+      }
+      await reply('/local list\n/local set <name> <json>\n/local remove <name>');
+      return true;
+    }
+
+    return false;
+  }
+
 
   private async handle(msg: WeixinMessage, text: string, refText: string, media?: DownloadedMedia[]): Promise<void> {
     const uid = msg.from_user_id;
@@ -285,6 +503,13 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           '',
           '— 设置 —',
           '/status  查看所有配置',
+          '/config show  查看桥接配置',
+          '/config default <tool>  设置默认工具',
+          '/config workdir <路径>  设置全局工作目录',
+          '/allow list|add|remove|clear  配置允许用户',
+          '/nas show|path|on|off|date|overwrite  配置NAS归档',
+          '/remote list|set|remove  配置局域网HTTP Agent',
+          '/local list|set|remove  配置本机CLI Agent',
           '/model <名>  切模型',
           '/mode <auto|safe|plan>  权限',
           '/effort <low|med|high|max>  深度',
@@ -340,6 +565,13 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
         ].join('\n'));
         return true;
 
+      case 'config':
+      case 'allow':
+      case 'nas':
+      case 'remote':
+      case 'local':
+        return this.handleConfigCommand(uid, cmd, arg, reply);
+
       case 'status': case 'st': {
         const def = settings.defaultTool || this.config.defaultTool;
         const currentMsgMode = this.normalizeMsgMode(settings.msgMode);
@@ -359,6 +591,10 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           `cliVerbose: ${settings.verbose ? 'ON' : 'OFF'} (Kimi)`,
           `system: ${settings.systemPrompt ? settings.systemPrompt.substring(0, 40) + '...' : '无'}`,
           `dir: ${settings.workDir || this.config.workDir}`,
+          `allowedUsers: ${this.config.allowedUsers.length ? this.config.allowedUsers.length : 'ALL'}`,
+          `remoteAgents: ${Object.keys(this.config.remoteAgents).join(', ') || '无'}`,
+          `localAgents: ${Object.keys(this.config.localAgents).join(', ') || '无'}`,
+          `nas: ${this.config.nasArchive.enabled ? 'ON' : 'OFF'} ${this.config.nasArchive.path || ''}`.trim(),
           `会话: ${sids}`,
           `可用: ${this.registry.getAvailableNames().join(', ')}`,
         ];

@@ -177,6 +177,44 @@ Linux/macOS 可先挂载 NAS，再填写挂载目录：
 }
 ```
 
+### 微信内配置
+
+大部分桥接配置可以直接在微信里发命令修改，配置会保存到 `~/.wx-ai-bridge/config.json`。
+
+建议先把自己加入允许列表，避免其他人改配置：
+
+```text
+/allow add
+```
+
+常用配置命令：
+
+```text
+/config show
+/config default codex
+/config workdir D:\Windows\Default\Documents\wechat-workspace
+
+/nas path \\NAS01\wechat-inbox\project-a
+/nas on
+/nas date on
+/nas overwrite off
+
+/remote set codexa {"displayName":"Codex on Linux A","endpoint":"http://192.168.1.50:8787/agent","apiKey":"change-me","timeout":300000}
+/remote list
+/remote remove codexa
+
+/local set ollama {"displayName":"Ollama Local","command":"ollama","args":["run","qwen2.5-coder:7b"],"promptMode":"stdin"}
+/local list
+/local remove ollama
+```
+
+说明：
+
+- `/nas path` 会自动开启 NAS 归档。
+- `/remote set` 和 `/local set` 写入后会热注册，通常不需要重启。
+- `allowedUsers` 为空时表示允许所有用户；执行 `/allow add` 会把当前微信用户加入白名单，之后只有白名单用户会被处理。
+- 复杂配置使用 JSON，手机输入时注意双引号必须是英文半角。
+
 ## 使用
 
 ```text
