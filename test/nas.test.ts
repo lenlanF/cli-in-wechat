@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { archiveMediaToNas } from '../src/utils/nas.js';
+import { archiveMediaToNas, getUncShareRoot } from '../src/utils/nas.js';
 
 test('archiveMediaToNas copies media and avoids overwriting same-name files', () => {
   const root = mkdtempSync(join(tmpdir(), 'wx-nas-'));
@@ -70,4 +70,10 @@ test('archiveMediaToNas supports a specified NAS device and folder path', () => 
   assert.ok(archived.nasPath?.startsWith(nasDeviceFolder));
   assert.ok(archived.nasPath?.endsWith('image.png'));
   assert.equal(readFileSync(archived.nasPath!, 'utf-8'), 'png-bytes');
+});
+
+test('getUncShareRoot extracts server and share from a nested NAS path', () => {
+  assert.equal(getUncShareRoot('\\\\NAS01\\wechat-inbox\\project-a'), '\\\\NAS01\\wechat-inbox');
+  assert.equal(getUncShareRoot('\\\\192.168.1.10\\share\\wechat-inbox'), '\\\\192.168.1.10\\share');
+  assert.equal(getUncShareRoot('D:\\local\\folder'), null);
 });

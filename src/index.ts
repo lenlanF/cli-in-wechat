@@ -9,6 +9,7 @@ import {
   loadCredentials,
   saveCredentials,
   ensureDataDir,
+  type ClawBotConfig,
 } from './config.js';
 import { log, setLogLevel, LogLevel } from './utils/logger.js';
 
@@ -57,44 +58,61 @@ async function main() {
 
   // ─── 2. WeChat login ─────────────────────────────────
 
-  let credentials = loadCredentials();
+  const botProfiles: ClawBotConfig[] = config.clawbots.length > 0
+    ? config.clawbots.filter((bot) => bot.enabled !== false)
+    : [{ name: 'default', enabled: true }];
 
-  if (!credentials) {
-    log.info('需要登录微信 ClawBot...');
+  const loginBot = async (botName: string) => {
+    let credentials = loadCredentials(botName);
 
-    let qrGenerate: ((text: string, opts: { small: boolean }) => void) | null = null;
-    try {
-      const mod = await import('qrcode-terminal');
-      const qt = mod.default || mod;
-      qrGenerate = qt.generate?.bind(qt) ?? null;
-    } catch {
-      // fallback to URL display
+    if (!credentials) {
+      log.info(`需要登录微信 ClawBot [${botName}]...`);
+
+      let qrGenerate: ((text: string, opts: { small: boolean }) => void) | null = null;
+      try {
+        const mod = await import('qrcode-terminal');
+        const qt = mod.default || mod;
+        qrGenerate = qt.generate?.bind(qt) ?? null;
+      } catch {
+        // fallback to URL display
+      }
+
+      credentials = await login((qrContent) => {
+        log.info(`请扫描 ClawBot [${botName}] 二维码`);
+        if (qrGenerate) {
+          qrGenerate(qrContent, { small: true });
+        } else {
+          log.info(`请用微信扫描二维码 [${botName}]: ${qrContent}`);
+        }
+      });
+
+      saveCredentials(credentials, botName);
+    } else {
+      log.info(`使用已保存的登录凭据 [${botName}]`);
     }
 
-    credentials = await login((qrContent) => {
-      if (qrGenerate) {
-        qrGenerate(qrContent, { small: true });
-      } else {
-        log.info(`请用微信扫描二维码: ${qrContent}`);
-      }
-    });
-
-    saveCredentials(credentials);
-  } else {
-    log.info('使用已保存的登录凭据');
-  }
+    return credentials;
+  };
 
   // ─── 3. Start bridge ─────────────────────────────────
 
-  const ilink = new ILinkClient(credentials, config);
-  const sessions = new SessionManager();
-  const router = new Router(ilink, registry, sessions, config);
+  const clients: ILinkClient[] = [];
 
-  router.start();
-  ilink.start();
+  for (const bot of botProfiles) {
+    const botName = bot.name || 'default';
+    const credentials = await loginBot(botName);
+    const ilink = new ILinkClient(credentials, config, botName);
+    const sessions = new SessionManager(botName);
+    const router = new Router(ilink, registry, sessions, config);
+
+    router.start();
+    ilink.start();
+    clients.push(ilink);
+  }
 
   log.info(`桥接服务已启动`);
   log.info(`默认工具: ${config.defaultTool} | 可用: ${available.join(', ')}`);
+  log.info(`ClawBot: ${botProfiles.map((bot) => bot.name || 'default').join(', ')}`);
   log.info('在微信 ClawBot 中发送消息即可开始');
   log.info('Ctrl+C 退出');
 
@@ -102,7 +120,7 @@ async function main() {
 
   const shutdown = () => {
     log.info('正在关闭...');
-    ilink.stop();
+    for (const client of clients) client.stop();
     process.exit(0);
   };
 

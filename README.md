@@ -59,7 +59,10 @@ npm run dev
 {
   "defaultTool": "lan",
   "workDir": "D:\\Windows\\Default\\Documents\\wechat-workspace",
-  "allowedUsers": [],
+  "clawbots": [
+    { "name": "default" },
+    { "name": "work" }
+  ],
   "remoteAgents": {
     "lan": {
       "displayName": "LAN Agent",
@@ -79,6 +82,11 @@ npm run dev
   "nasArchive": {
     "enabled": true,
     "path": "\\\\NAS\\wechat-inbox",
+    "auth": {
+      "username": "nas-user",
+      "password": "nas-password",
+      "domain": "WORKGROUP"
+    },
     "organizeByDate": true,
     "overwrite": false
   }
@@ -142,6 +150,37 @@ A 上启动 HTTP Agent wrapper，B 上把它配置成 `remoteAgents.codexa`。�
 @localpy 你好，读取刚才的文件
 ```
 
+### 多微信 ClawBot
+
+默认只启动一个 `default` ClawBot。需要接入多个微信 ClawBot 时，在配置里加入：
+
+```json
+{
+  "clawbots": [
+    { "name": "default" },
+    { "name": "work" },
+    { "name": "family" }
+  ]
+}
+```
+
+也可以在微信里配置：
+
+```text
+/clawbot list
+/clawbot add work
+/clawbot remove work
+```
+
+新增或删除 ClawBot profile 后需要重启服务。每个 profile 会单独保存：
+
+- 登录凭据
+- poll cursor
+- context token
+- 会话状态
+
+首次启动新 profile 时会显示对应二维码，需要用目标微信 ClawBot 扫码登录。
+
 ### NAS 文件归档
 
 启用 `nasArchive` 后，微信发来的图片、文件、视频会同时保存到：
@@ -166,6 +205,31 @@ Windows 推荐使用 UNC 路径：
 
 这里的 `path` 就是“指定设备 + 指定文件夹”。可用 NAS 主机名，例如 `\\\\NAS01\\wechat-inbox\\project-a`，也可用 IP，例如 `\\\\192.168.1.10\\share\\wechat-inbox\\project-a`。
 
+如果 NAS 共享需要用户名和密码，Windows 下可以配置：
+
+```json
+{
+  "nasArchive": {
+    "enabled": true,
+    "path": "\\\\NAS01\\wechat-inbox\\project-a",
+    "auth": {
+      "username": "nas-user",
+      "password": "nas-password",
+      "domain": "WORKGROUP"
+    }
+  }
+}
+```
+
+也可以直接在微信里配置：
+
+```text
+/nas auth nas-user nas-password WORKGROUP
+/nas auth clear
+```
+
+Windows 下归档前会自动执行共享连接。Linux/macOS 建议先用系统方式挂载 NAS，再把 `path` 配成挂载目录。
+
 Linux/macOS 可先挂载 NAS，再填写挂载目录：
 
 ```json
@@ -181,12 +245,6 @@ Linux/macOS 可先挂载 NAS，再填写挂载目录：
 
 大部分桥接配置可以直接在微信里发命令修改，配置会保存到 `~/.wx-ai-bridge/config.json`。
 
-建议先把自己加入允许列表，避免其他人改配置：
-
-```text
-/allow add
-```
-
 常用配置命令：
 
 ```text
@@ -194,7 +252,11 @@ Linux/macOS 可先挂载 NAS，再填写挂载目录：
 /config default codex
 /config workdir D:\Windows\Default\Documents\wechat-workspace
 
+/clawbot list
+/clawbot add work
+
 /nas path \\NAS01\wechat-inbox\project-a
+/nas auth nas-user nas-password WORKGROUP
 /nas on
 /nas date on
 /nas overwrite off
@@ -211,8 +273,8 @@ Linux/macOS 可先挂载 NAS，再填写挂载目录：
 说明：
 
 - `/nas path` 会自动开启 NAS 归档。
+- `/nas auth` 会保存 NAS 用户名、密码和可选域；回复不会回显密码。
 - `/remote set` 和 `/local set` 写入后会热注册，通常不需要重启。
-- `allowedUsers` 为空时表示允许所有用户；执行 `/allow add` 会把当前微信用户加入白名单，之后只有白名单用户会被处理。
 - 复杂配置使用 JSON，手机输入时注意双引号必须是英文半角。
 
 ## 使用
@@ -271,7 +333,8 @@ test/             Node test 测试
 
 ## 安全建议
 
-- 生产使用时请配置 `allowedUsers`
+- 本项目默认认为接入的 ClawBot 拥有完整配置权限；不要把 ClawBot 暴露给不可信用户。
+- 如需多个微信 ClawBot，在 `clawbots` 中配置多个 profile。每个 profile 会单独保存登录凭据、poll cursor、context token 和会话状态。
 - 远端 Agent 建议设置 `apiKey`
 - NAS 共享目录建议使用专用目录和最小写权限
 - 不要提交 `~/.wx-ai-bridge/credentials.json`

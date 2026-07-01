@@ -171,7 +171,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
   }
 
   private isConfigAdmin(uid: string): boolean {
-    return this.config.allowedUsers.length === 0 || this.config.allowedUsers.includes(uid);
+    return true;
   }
 
   private saveBridgeConfig(): void {
@@ -220,7 +220,6 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           await reply([
             `defaultTool: ${this.config.defaultTool}`,
             `workDir: ${this.config.workDir}`,
-            `allowedUsers: ${this.config.allowedUsers.length ? this.config.allowedUsers.join(', ') : '(all)'}`,
             `remoteAgents: ${Object.keys(this.config.remoteAgents).join(', ') || '(none)'}`,
             `localAgents: ${Object.keys(this.config.localAgents).join(', ') || '(none)'}`,
             `nasArchive: ${this.config.nasArchive.enabled ? 'ON' : 'OFF'}`,
@@ -245,36 +244,6 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
       }
     }
 
-    if (cmd === 'allow') {
-      const op = sub.toLowerCase();
-      if (!op || op === 'list') {
-        await reply(`allowedUsers: ${this.config.allowedUsers.length ? this.config.allowedUsers.join('\n') : '(all users)'}`);
-        return true;
-      }
-      if (op === 'add') {
-        const id = rest || uid;
-        if (!this.config.allowedUsers.includes(id)) this.config.allowedUsers.push(id);
-        this.saveBridgeConfig();
-        await reply(`allowedUsers + ${id}`);
-        return true;
-      }
-      if (op === 'remove' || op === 'del') {
-        const id = rest || uid;
-        this.config.allowedUsers = this.config.allowedUsers.filter((item) => item !== id);
-        this.saveBridgeConfig();
-        await reply(`allowedUsers - ${id}`);
-        return true;
-      }
-      if (op === 'clear') {
-        this.config.allowedUsers = [];
-        this.saveBridgeConfig();
-        await reply('allowedUsers 已清空，当前允许所有用户');
-        return true;
-      }
-      await reply('/allow list\n/allow add [userId]\n/allow remove <userId>\n/allow clear');
-      return true;
-    }
-
     if (cmd === 'nas') {
       const op = sub.toLowerCase();
       if (!op || op === 'show') {
@@ -283,6 +252,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           `path: ${this.config.nasArchive.path || '(none)'}`,
           `organizeByDate: ${this.config.nasArchive.organizeByDate !== false}`,
           `overwrite: ${!!this.config.nasArchive.overwrite}`,
+          `auth: ${this.config.nasArchive.auth?.username ? 'configured' : '(none)'}`,
         ].join('\n'));
         return true;
       }
@@ -320,7 +290,26 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
         await reply(`overwrite → ${!!this.config.nasArchive.overwrite}`);
         return true;
       }
-      await reply('/nas show\n/nas path <path>\n/nas on|off\n/nas date on|off\n/nas overwrite on|off');
+      if (op === 'auth') {
+        if (!rest) { await reply('/nas auth <username> <password> [domain]\n/nas auth clear'); return true; }
+        if (rest.toLowerCase() === 'clear') {
+          delete this.config.nasArchive.auth;
+          this.saveBridgeConfig();
+          await reply('nas auth → cleared');
+          return true;
+        }
+        const authParts = rest.match(/^(\S+)\s+(\S+)(?:\s+(\S+))?$/);
+        if (!authParts) { await reply('/nas auth <username> <password> [domain]'); return true; }
+        this.config.nasArchive.auth = {
+          username: authParts[1],
+          password: authParts[2],
+          domain: authParts[3],
+        };
+        this.saveBridgeConfig();
+        await reply(`nas auth → ${authParts[3] ? `${authParts[3]}\\` : ''}${authParts[1]} (password hidden)`);
+        return true;
+      }
+      await reply('/nas show\n/nas path <path>\n/nas auth <username> <password> [domain]\n/nas auth clear\n/nas on|off\n/nas date on|off\n/nas overwrite on|off');
       return true;
     }
 
@@ -350,6 +339,37 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
         return true;
       }
       await reply('/remote list\n/remote set <name> <json>\n/remote remove <name>');
+      return true;
+    }
+
+    if (cmd === 'clawbot') {
+      const op = sub.toLowerCase();
+      if (!op || op === 'list') {
+        const bots = this.config.clawbots.length > 0
+          ? this.config.clawbots.map((bot) => `${bot.name}${bot.enabled === false ? ' (disabled)' : ''}`)
+          : ['default'];
+        await reply(bots.join('\n'));
+        return true;
+      }
+      if (op === 'add') {
+        const name = rest.trim();
+        if (!name) { await reply('/clawbot add <name>'); return true; }
+        if (!this.config.clawbots.some((bot) => bot.name === name)) {
+          this.config.clawbots.push({ name, enabled: true });
+        }
+        this.saveBridgeConfig();
+        await reply(`clawbots + ${name}\n重启后生效，首次启动会要求扫码登录该 ClawBot`);
+        return true;
+      }
+      if (op === 'remove' || op === 'del') {
+        const name = rest.trim();
+        if (!name) { await reply('/clawbot remove <name>'); return true; }
+        this.config.clawbots = this.config.clawbots.filter((bot) => bot.name !== name);
+        this.saveBridgeConfig();
+        await reply(`clawbots - ${name}\n重启后生效`);
+        return true;
+      }
+      await reply('/clawbot list\n/clawbot add <name>\n/clawbot remove <name>');
       return true;
     }
 
@@ -388,7 +408,6 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
 
   private async handle(msg: WeixinMessage, text: string, refText: string, media?: DownloadedMedia[]): Promise<void> {
     const uid = msg.from_user_id;
-    if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(uid)) return;
 
     const trimmed = text.trim();
 
@@ -506,8 +525,8 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           '/config show  查看桥接配置',
           '/config default <tool>  设置默认工具',
           '/config workdir <路径>  设置全局工作目录',
-          '/allow list|add|remove|clear  配置允许用户',
-          '/nas show|path|on|off|date|overwrite  配置NAS归档',
+          '/clawbot list|add|remove  配置多个微信ClawBot',
+          '/nas show|path|auth|on|off|date|overwrite  配置NAS归档',
           '/remote list|set|remove  配置局域网HTTP Agent',
           '/local list|set|remove  配置本机CLI Agent',
           '/model <名>  切模型',
@@ -566,7 +585,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
         return true;
 
       case 'config':
-      case 'allow':
+      case 'clawbot':
       case 'nas':
       case 'remote':
       case 'local':
@@ -591,7 +610,6 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           `cliVerbose: ${settings.verbose ? 'ON' : 'OFF'} (Kimi)`,
           `system: ${settings.systemPrompt ? settings.systemPrompt.substring(0, 40) + '...' : '无'}`,
           `dir: ${settings.workDir || this.config.workDir}`,
-          `allowedUsers: ${this.config.allowedUsers.length ? this.config.allowedUsers.length : 'ALL'}`,
           `remoteAgents: ${Object.keys(this.config.remoteAgents).join(', ') || '无'}`,
           `localAgents: ${Object.keys(this.config.localAgents).join(', ') || '无'}`,
           `nas: ${this.config.nasArchive.enabled ? 'ON' : 'OFF'} ${this.config.nasArchive.path || ''}`.trim(),

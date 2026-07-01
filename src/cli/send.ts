@@ -9,6 +9,7 @@ const MAX_CHUNK_SIZE = 2000;
 export async function sendCommand(args: string[]): Promise<void> {
   // ─── Parse arguments ─────────────────────────────────
   let targetUser: string | null = null;
+  let botName = 'default';
   const messageParts: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -18,6 +19,12 @@ export async function sendCommand(args: string[]): Promise<void> {
         process.exit(1);
       }
       targetUser = args[++i];
+    } else if (args[i] === '--bot') {
+      if (i + 1 >= args.length) {
+        console.error('错误: --bot 需要指定 ClawBot 名称');
+        process.exit(1);
+      }
+      botName = args[++i];
     } else {
       messageParts.push(args[i]);
     }
@@ -38,9 +45,9 @@ export async function sendCommand(args: string[]): Promise<void> {
   }
 
   // ─── Load credentials ────────────────────────────────
-  const credentials = loadCredentials();
+  const credentials = loadCredentials(botName);
   if (!credentials) {
-    console.error('错误: 未登录。请先运行 `npm run dev` 扫码登录。');
+    console.error(`错误: ClawBot "${botName}" 未登录。请先运行 \`npm run dev\` 扫码登录。`);
     process.exit(1);
   }
 
@@ -48,7 +55,7 @@ export async function sendCommand(args: string[]): Promise<void> {
   const userId = targetUser || credentials.ilinkUserId;
 
   // ─── Load context_token ──────────────────────────────
-  const contextTokens = loadContextTokens();
+  const contextTokens = loadContextTokens(botName);
   const contextToken = contextTokens.get(userId);
 
   if (!contextToken) {
@@ -157,6 +164,7 @@ function printUsage(): void {
 
 选项:
   -u, --user <userId>    指定目标用户 ID（默认发给自己）
+  --bot <name>           指定 ClawBot profile（默认 default）
 
 示例:
   wcli send "hello"                    发送消息给自己

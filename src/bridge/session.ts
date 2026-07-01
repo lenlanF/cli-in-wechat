@@ -1,12 +1,14 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { getSessionsDir } from '../config.js';
 import { DEFAULT_SETTINGS, type UserSettings } from '../adapters/base.js';
 
 export class SessionManager {
   private data = new Map<string, UserSettings>();
+  private botName: string;
 
-  constructor() {
+  constructor(botName = 'default') {
+    this.botName = botName;
     this.load();
   }
 
@@ -43,7 +45,7 @@ export class SessionManager {
   }
 
   private filePath(): string {
-    return join(getSessionsDir(), 'sessions.json');
+    return join(getSessionsDir(this.botName), 'sessions.json');
   }
 
   private load(): void {
@@ -61,6 +63,7 @@ export class SessionManager {
     const out: Record<string, UserSettings> = {};
     for (const [k, v] of this.data) out[k] = v;
     try {
+      mkdirSync(dirname(this.filePath()), { recursive: true });
       writeFileSync(this.filePath(), JSON.stringify(out, null, 2), { mode: 0o600 });
     } catch { /* ignore */ }
   }

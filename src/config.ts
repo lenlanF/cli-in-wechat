@@ -10,6 +10,23 @@ const SESSIONS_DIR = join(DATA_DIR, 'sessions');
 const POLL_CURSOR_FILE = join(DATA_DIR, 'poll_cursor.txt');
 const CONTEXT_TOKENS_FILE = join(DATA_DIR, 'context_tokens.json');
 
+function botDataDir(botName?: string): string {
+  const name = botName || 'default';
+  return name === 'default' ? DATA_DIR : join(DATA_DIR, 'bots', name);
+}
+
+function credentialsFile(botName?: string): string {
+  return botName && botName !== 'default' ? join(botDataDir(botName), 'credentials.json') : CREDENTIALS_FILE;
+}
+
+function pollCursorFile(botName?: string): string {
+  return botName && botName !== 'default' ? join(botDataDir(botName), 'poll_cursor.txt') : POLL_CURSOR_FILE;
+}
+
+function contextTokensFile(botName?: string): string {
+  return botName && botName !== 'default' ? join(botDataDir(botName), 'context_tokens.json') : CONTEXT_TOKENS_FILE;
+}
+
 export interface ToolConfig {
   args?: string[];
   files?: string[];
@@ -35,11 +52,23 @@ export interface LocalAgentConfig {
   timeout?: number;
 }
 
+export interface NasAuthConfig {
+  username?: string;
+  password?: string;
+  domain?: string;
+}
+
 export interface NasArchiveConfig {
   enabled: boolean;
   path: string;
   organizeByDate?: boolean;
   overwrite?: boolean;
+  auth?: NasAuthConfig;
+}
+
+export interface ClawBotConfig {
+  name: string;
+  enabled?: boolean;
 }
 
 export interface BridgeConfig {
@@ -53,6 +82,7 @@ export interface BridgeConfig {
   remoteAgents: Record<string, RemoteAgentConfig>;
   localAgents: Record<string, LocalAgentConfig>;
   nasArchive: NasArchiveConfig;
+  clawbots: ClawBotConfig[];
 }
 
 const DEFAULT_CONFIG: BridgeConfig = {
@@ -71,6 +101,7 @@ const DEFAULT_CONFIG: BridgeConfig = {
     organizeByDate: true,
     overwrite: false,
   },
+  clawbots: [],
 };
 
 export function ensureDataDir(): void {
@@ -91,6 +122,7 @@ export function loadConfig(): BridgeConfig {
       remoteAgents: { ...DEFAULT_CONFIG.remoteAgents, ...(parsed.remoteAgents || {}) },
       localAgents: { ...DEFAULT_CONFIG.localAgents, ...(parsed.localAgents || {}) },
       nasArchive: { ...DEFAULT_CONFIG.nasArchive, ...(parsed.nasArchive || {}) },
+      clawbots: parsed.clawbots || DEFAULT_CONFIG.clawbots,
     };
   } catch {
     return { ...DEFAULT_CONFIG };
@@ -102,10 +134,11 @@ export function saveConfig(config: BridgeConfig): void {
   writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
-export function loadCredentials(): Credentials | null {
-  if (!existsSync(CREDENTIALS_FILE)) return null;
+export function loadCredentials(botName?: string): Credentials | null {
+  const file = credentialsFile(botName);
+  if (!existsSync(file)) return null;
   try {
-    const data = JSON.parse(readFileSync(CREDENTIALS_FILE, 'utf-8'));
+    const data = JSON.parse(readFileSync(file, 'utf-8'));
     if (!data.botToken) return null;
     return data as Credentials;
   } catch {
@@ -113,44 +146,51 @@ export function loadCredentials(): Credentials | null {
   }
 }
 
-export function saveCredentials(creds: Credentials): void {
+export function saveCredentials(creds: Credentials, botName?: string): void {
   ensureDataDir();
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  mkdirSync(botDataDir(botName), { recursive: true, mode: 0o700 });
+  writeFileSync(credentialsFile(botName), JSON.stringify(creds, null, 2), { mode: 0o600 });
 }
 
-export function clearCredentials(): void {
-  if (existsSync(CREDENTIALS_FILE)) {
-    writeFileSync(CREDENTIALS_FILE, '{}', { mode: 0o600 });
+export function clearCredentials(botName?: string): void {
+  const file = credentialsFile(botName);
+  if (existsSync(file)) {
+    writeFileSync(file, '{}', { mode: 0o600 });
   }
 }
 
-export function loadPollCursor(): string {
-  if (!existsSync(POLL_CURSOR_FILE)) return '';
+export function loadPollCursor(botName?: string): string {
+  const file = pollCursorFile(botName);
+  if (!existsSync(file)) return '';
   try {
-    return readFileSync(POLL_CURSOR_FILE, 'utf-8').trim();
+    return readFileSync(file, 'utf-8').trim();
   } catch {
     return '';
   }
 }
 
-export function savePollCursor(cursor: string): void {
+export function savePollCursor(cursor: string, botName?: string): void {
   ensureDataDir();
-  writeFileSync(POLL_CURSOR_FILE, cursor, { mode: 0o600 });
+  mkdirSync(botDataDir(botName), { recursive: true, mode: 0o700 });
+  writeFileSync(pollCursorFile(botName), cursor, { mode: 0o600 });
 }
 
-export function saveContextTokens(tokens: Map<string, string>): void {
+export function saveContextTokens(tokens: Map<string, string>, botName?: string): void {
   ensureDataDir();
+  mkdirSync(botDataDir(botName), { recursive: true, mode: 0o700 });
   const obj: Record<string, string> = {};
   for (const [k, v] of tokens) obj[k] = v;
-  const tmp = CONTEXT_TOKENS_FILE + '.tmp';
+  const file = contextTokensFile(botName);
+  const tmp = file + '.tmp';
   writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
-  renameSync(tmp, CONTEXT_TOKENS_FILE);
+  renameSync(tmp, file);
 }
 
-export function loadContextTokens(): Map<string, string> {
-  if (!existsSync(CONTEXT_TOKENS_FILE)) return new Map();
+export function loadContextTokens(botName?: string): Map<string, string> {
+  const file = contextTokensFile(botName);
+  if (!existsSync(file)) return new Map();
   try {
-    const raw = readFileSync(CONTEXT_TOKENS_FILE, 'utf-8');
+    const raw = readFileSync(file, 'utf-8');
     const obj = JSON.parse(raw) as Record<string, string>;
     return new Map(Object.entries(obj));
   } catch {
@@ -158,8 +198,8 @@ export function loadContextTokens(): Map<string, string> {
   }
 }
 
-export function getSessionsDir(): string {
-  return SESSIONS_DIR;
+export function getSessionsDir(botName?: string): string {
+  return botName && botName !== 'default' ? join(botDataDir(botName), 'sessions') : SESSIONS_DIR;
 }
 
 export { DATA_DIR };

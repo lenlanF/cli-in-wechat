@@ -12,9 +12,8 @@
 
 ## 部署建议
 
-- 使用 `allowedUsers` 限制可操作此桥接服务的微信用户。
-- 建议首次启动后立刻在微信里发送 `/allow add`，把当前用户加入白名单。
-- `/nas`、`/remote`、`/local`、`/allow` 等配置命令会写入本地配置文件；不要把 bot 暴露给不可信用户。
+- `/nas`、`/remote`、`/local` 等配置命令会写入本地配置文件；不要把 bot 暴露给不可信用户。
+- NAS 密码会保存在 `~/.wx-ai-bridge/config.json` 中。建议使用 NAS 专用低权限账号，只给目标目录写权限。
 - 远端 Agent 建议绑定局域网地址，并使用 `apiKey` 或反向代理鉴权。
 - NAS 目录建议使用专用共享文件夹和最小写入权限。
 - 不要把 `~/.wx-ai-bridge/credentials.json` 提交到仓库或同步到不可信设备。

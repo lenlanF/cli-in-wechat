@@ -55,10 +55,12 @@ export class ILinkClient {
   private backoffMs = 1000;
   private abortController: AbortController | null = null;
   private config?: BridgeConfig;
+  private botName: string;
 
-  constructor(credentials: Credentials, config?: BridgeConfig) {
+  constructor(credentials: Credentials, config?: BridgeConfig, botName = 'default') {
     this.credentials = credentials;
-    this.pollCursor = loadPollCursor();
+    this.botName = botName;
+    this.pollCursor = loadPollCursor(botName);
     this.config = config;
   }
 
@@ -83,14 +85,14 @@ export class ILinkClient {
 
   start(): void {
     this.running = true;
-    log.info('iLink 消息轮询已启动');
+    log.info(`iLink 消息轮询已启动 [${this.botName}]`);
     this.pollLoop();
   }
 
   stop(): void {
     this.running = false;
     this.abortController?.abort();
-    log.info('iLink 消息轮询已停止');
+    log.info(`iLink 消息轮询已停止 [${this.botName}]`);
   }
 
   // ─── Long-polling loop ─────────────────────────────────
@@ -159,7 +161,7 @@ export class ILinkClient {
 
       if (data.get_updates_buf) {
         this.pollCursor = data.get_updates_buf;
-        savePollCursor(this.pollCursor);
+        savePollCursor(this.pollCursor, this.botName);
       }
 
       return data.msgs || [];
@@ -176,7 +178,7 @@ export class ILinkClient {
 
     // Cache context_token for this user
     this.contextTokens.set(msg.from_user_id, msg.context_token);
-    saveContextTokens(this.contextTokens);
+    saveContextTokens(this.contextTokens, this.botName);
 
     log.debug(`[msg] item_list=${JSON.stringify(msg.item_list)}`);
     const { text, refText, mediaItems } = await parseMessage(msg, this.config);

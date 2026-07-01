@@ -61,6 +61,7 @@ function createRouter() {
       organizeByDate: true,
       overwrite: false,
     },
+    clawbots: [],
   };
 
   const router = new Router(ilink as any, registry as any, sessions as any, config);
@@ -182,6 +183,21 @@ test('handleSlash /nas path enables NAS archive and stores target folder', async
   assert.ok(messages[messages.length - 1]?.text.includes('nasArchive → ON'));
 });
 
+test('handleSlash /nas auth stores NAS credentials without echoing password', async () => {
+  const { router, messages } = createRouter();
+
+  await router.handleSlash('u1', '/nas auth nasuser secretpass WORKGROUP');
+
+  assert.deepEqual(router.config.nasArchive.auth, {
+    username: 'nasuser',
+    password: 'secretpass',
+    domain: 'WORKGROUP',
+  });
+  const reply = messages[messages.length - 1]?.text || '';
+  assert.ok(reply.includes('WORKGROUP\\nasuser'));
+  assert.equal(reply.includes('secretpass'), false);
+});
+
 test('handleSlash /remote set stores custom LAN agent config', async () => {
   const { router, messages } = createRouter();
   let registeredName = '';
@@ -214,13 +230,13 @@ test('handleSlash /local set stores custom local CLI agent config', async () => 
   assert.ok(messages[messages.length - 1]?.text.includes('localAgents.ollama'));
 });
 
-test('handleSlash /allow add stores current user by default', async () => {
+test('handleSlash /clawbot add stores an additional bot profile', async () => {
   const { router, messages } = createRouter();
 
-  await router.handleSlash('u1', '/allow add');
+  await router.handleSlash('u1', '/clawbot add work');
 
-  assert.deepEqual(router.config.allowedUsers, ['u1']);
-  assert.ok(messages[messages.length - 1]?.text.includes('allowedUsers + u1'));
+  assert.deepEqual(router.config.clawbots, [{ name: 'work', enabled: true }]);
+  assert.ok(messages[messages.length - 1]?.text.includes('重启后生效'));
 });
 
 test('handleSlash /model strips accidental /. suffix from model name', async () => {

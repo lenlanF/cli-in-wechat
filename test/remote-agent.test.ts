@@ -26,6 +26,7 @@ function createConfig(): BridgeConfig {
       organizeByDate: true,
       overwrite: false,
     },
+    clawbots: [],
   };
 }
 

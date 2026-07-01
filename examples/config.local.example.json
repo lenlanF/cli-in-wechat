@@ -2,7 +2,10 @@
   "defaultTool": "lan",
   "workDir": "D:\\Windows\\Default\\Documents\\wechat-workspace",
   "cliTimeout": 300000,
-  "allowedUsers": [],
+  "clawbots": [
+    { "name": "default" },
+    { "name": "work" }
+  ],
   "remoteAgents": {
     "lan": {
       "displayName": "LAN Agent",
@@ -39,6 +42,11 @@
   "nasArchive": {
     "enabled": true,
     "path": "\\\\NAS01\\wechat-inbox\\project-a",
+    "auth": {
+      "username": "nas-user",
+      "password": "nas-password",
+      "domain": "WORKGROUP"
+    },
     "organizeByDate": true,
     "overwrite": false
   },
