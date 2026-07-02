@@ -59,6 +59,7 @@ npm run dev
 {
   "defaultTool": "lan",
   "workDir": "D:\\Windows\\Default\\Documents\\wechat-workspace",
+  "taskKeepAliveInterval": 90000,
   "clawbots": [
     { "name": "default" },
     { "name": "work" }
@@ -305,6 +306,20 @@ Linux/macOS 可先挂载 NAS，再填写挂载目录：
 - 目前没有公开接口支持 Bot 对一个从未互动过的用户/会话主动创建新对话。
 
 因此本项目支持的是“对已建立会话的主动发送/延迟发送”，不是“凭空新建微信对话”。多 ClawBot profile 会分别保存各自的 context token。
+
+公开资料没有给出 `context_token` 的明确有效期；不同版本/场景下表现可能不同。有实现提到较长时间内可复用，也有实践反馈长任务静默约数分钟后可能发送失败。因此本项目按“不保证长期有效”处理：
+
+- 长任务默认每 `90s` 发送一次轻量 keepalive：`仍在处理...`。
+- 最终结果发送失败时，会缓存最多 5 条待补发消息。
+- 用户下一次给同一 ClawBot 发消息时，桥接服务拿到新的 `context_token` 后会先补发缓存结果。
+
+可以在配置里调整 keepalive 间隔，设为 `0` 表示关闭：
+
+```json
+{
+  "taskKeepAliveInterval": 90000
+}
+```
 
 ## 常用命令
 

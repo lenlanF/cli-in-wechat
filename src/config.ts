@@ -76,6 +76,7 @@ export interface BridgeConfig {
   maxResponseChunkSize: number;
   cliTimeout: number;
   typingInterval: number;
+  taskKeepAliveInterval: number;
   allowedUsers: string[];
   workDir: string;
   tools: Record<string, ToolConfig>;
@@ -90,6 +91,7 @@ const DEFAULT_CONFIG: BridgeConfig = {
   maxResponseChunkSize: 2000,
   cliTimeout: 300_000,      // 5 minutes
   typingInterval: 5_000,    // 5 seconds
+  taskKeepAliveInterval: 90_000, // keep send context warm for long-running agents
   allowedUsers: [],          // empty = allow all
   workDir: process.cwd(),
   tools: {},

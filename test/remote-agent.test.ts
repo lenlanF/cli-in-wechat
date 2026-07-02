@@ -10,6 +10,7 @@ function createConfig(): BridgeConfig {
     maxResponseChunkSize: 2000,
     cliTimeout: 300_000,
     typingInterval: 5000,
+    taskKeepAliveInterval: 0,
     allowedUsers: [],
     workDir: process.cwd(),
     tools: {},

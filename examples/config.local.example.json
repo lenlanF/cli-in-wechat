@@ -2,6 +2,7 @@
   "defaultTool": "lan",
   "workDir": "D:\\Windows\\Default\\Documents\\wechat-workspace",
   "cliTimeout": 300000,
+  "taskKeepAliveInterval": 90000,
   "clawbots": [
     { "name": "default" },
     { "name": "work" }

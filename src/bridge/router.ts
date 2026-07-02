@@ -38,6 +38,7 @@ export class Router {
   private config: BridgeConfig;
   private active = new Map<string, ActiveTask>();
   private lastResponse = new Map<string, { tool: string; text: string }>();
+  private pendingDeliveries = new Map<string, string[]>();
   private pendingQuestions = new Map<string, PendingQuestion>();
   private _lastSessionList: Array<{ id: string; date: string; summary: string }> | null = null;
   private persistConfig: (config: BridgeConfig) => void = saveConfig;
@@ -168,6 +169,43 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
       if (i < batches.length - 1) await this.sleep(NORMAL_ACTIVITY_SPLIT_DELAY_MS);
     }
     return true;
+  }
+
+  private queuePendingDelivery(uid: string, text: string): void {
+    if (!text.trim()) return;
+    const list = this.pendingDeliveries.get(uid) || [];
+    list.push(text);
+    while (list.length > 5) list.shift();
+    this.pendingDeliveries.set(uid, list);
+  }
+
+  private async flushPendingDeliveries(uid: string): Promise<void> {
+    const list = this.pendingDeliveries.get(uid);
+    if (!list || list.length === 0) return;
+
+    this.pendingDeliveries.delete(uid);
+    const remaining: string[] = [];
+    for (const item of list) {
+      try {
+        await this.ilink.sendText(uid, `[补发]\n${item}`);
+      } catch (err) {
+        remaining.push(item);
+        log.warn(`[delivery] 补发失败，将继续等待下一条用户消息: ${(err as Error).message}`);
+        break;
+      }
+    }
+    if (remaining.length > 0) this.pendingDeliveries.set(uid, remaining);
+  }
+
+  private async sendTextOrQueue(uid: string, text: string): Promise<boolean> {
+    try {
+      await this.ilink.sendText(uid, text);
+      return true;
+    } catch (err) {
+      log.error('[delivery] 发送失败，已缓存等待用户下次消息后补发:', err);
+      this.queuePendingDelivery(uid, text);
+      return false;
+    }
   }
 
   private isConfigAdmin(uid: string): boolean {
@@ -410,6 +448,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     const uid = msg.from_user_id;
 
     const trimmed = text.trim();
+    await this.flushPendingDeliveries(uid);
 
     // Build media context for CLI
     let mediaContext = '';
@@ -1450,6 +1489,17 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     const start = Date.now();
     const settings = this.sessions.get(uid);
     const msgMode = this.normalizeMsgMode(settings.msgMode);
+    const keepAliveInterval = this.config.taskKeepAliveInterval || 0;
+    let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+    if (keepAliveInterval > 0) {
+      keepAliveTimer = setInterval(() => {
+        if (abort.signal.aborted) return;
+        const seconds = Math.round((Date.now() - start) / 1000);
+        this.ilink.sendText(uid, `仍在处理... (${seconds}s)`, { streamType: 'intermediate' }).catch((err) => {
+          log.warn(`[${toolName}] keepalive 发送失败: ${(err as Error).message}`);
+        });
+      }, keepAliveInterval);
+    }
 
     // Track if we've streamed text (to avoid duplicate with final result)
     let hasStreamedText = false;
@@ -1591,14 +1641,14 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
         const tailNotice = intermediateSendFailed
           ? `${notice}[部分中间消息发送失败]${sentNotice}`
           : `${notice}${sentNotice}`;
-        await this.ilink.sendText(uid, formatResponse(`${finalActivityBlock}${tailNotice}`.trim(), {
+        await this.sendTextOrQueue(uid, formatResponse(`${finalActivityBlock}${tailNotice}`.trim(), {
           tool: adapter.displayName,
           duration: result.duration || (Date.now() - start),
           error: result.error,
         }));
       } else {
         // compact mode or no streamed text: send full result
-        await this.ilink.sendText(uid, formatResponse(`${finalActivityBlock}${notice}${cleanText}${sentNotice}`, {
+        await this.sendTextOrQueue(uid, formatResponse(`${finalActivityBlock}${notice}${cleanText}${sentNotice}`, {
           tool: adapter.displayName,
           duration: result.duration || (Date.now() - start),
           error: result.error,
@@ -1607,11 +1657,12 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     } catch (err: unknown) {
       if (!abort.signal.aborted) {
         log.error(`[${toolName}] 失败:`, err);
-        await this.ilink.sendText(uid, `失败: ${(err as Error).message}`);
+        await this.sendTextOrQueue(uid, `失败: ${(err as Error).message}`);
       }
     } finally {
       // Defensive cleanup for pending timer when task exits early.
       if (textFlushTimer) clearTimeout(textFlushTimer);
+      if (keepAliveTimer) clearInterval(keepAliveTimer);
       stopTyping();
       this.active.delete(`${uid}:${toolName}`);
     }

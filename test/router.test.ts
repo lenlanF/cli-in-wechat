@@ -50,6 +50,7 @@ function createRouter() {
     maxResponseChunkSize: 2000,
     cliTimeout: 300_000,
     typingInterval: 5000,
+    taskKeepAliveInterval: 0,
     allowedUsers: [],
     workDir: process.cwd(),
     tools: {},
@@ -344,4 +345,25 @@ test('exec maps stale default-alias model to empty before adapter execution', as
 
   assert.equal(capturedModels[0], '');
   assert.equal((sessions.get('u1') as any).model, '');
+});
+
+test('sendTextOrQueue stores failed final delivery and flushes on next user message', async () => {
+  const { router, messages } = createRouter();
+  let failNext = true;
+  router.ilink.sendText = async (uid: string, text: string) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error('context token expired');
+    }
+    messages.push({ uid, text });
+  };
+
+  const ok = await router.sendTextOrQueue('u1', 'final result');
+  assert.equal(ok, false);
+
+  router.exec = async () => {};
+  await router.handle(makeMessage('u1'), 'next message', '');
+
+  assert.equal(messages[0].uid, 'u1');
+  assert.equal(messages[0].text, '[补发]\nfinal result');
 });
