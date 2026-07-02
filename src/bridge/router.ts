@@ -39,6 +39,7 @@ export class Router {
   private active = new Map<string, ActiveTask>();
   private lastResponse = new Map<string, { tool: string; text: string }>();
   private pendingDeliveries = new Map<string, string[]>();
+  private pendingDeliveryNotified = new Set<string>();
   private pendingQuestions = new Map<string, PendingQuestion>();
   private _lastSessionList: Array<{ id: string; date: string; summary: string }> | null = null;
   private persistConfig: (config: BridgeConfig) => void = saveConfig;
@@ -177,6 +178,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     list.push(text);
     while (list.length > 5) list.shift();
     this.pendingDeliveries.set(uid, list);
+    this.pendingDeliveryNotified.delete(uid);
   }
 
   private async flushPendingDeliveries(uid: string): Promise<void> {
@@ -184,6 +186,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     if (!list || list.length === 0) return;
 
     this.pendingDeliveries.delete(uid);
+    this.pendingDeliveryNotified.delete(uid);
     const remaining: string[] = [];
     for (const item of list) {
       try {
@@ -195,6 +198,29 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
       }
     }
     if (remaining.length > 0) this.pendingDeliveries.set(uid, remaining);
+  }
+
+  private clearPendingDeliveries(uid: string): number {
+    const count = this.pendingDeliveries.get(uid)?.length || 0;
+    this.pendingDeliveries.delete(uid);
+    this.pendingDeliveryNotified.delete(uid);
+    return count;
+  }
+
+  private async notifyPendingDeliveries(uid: string): Promise<void> {
+    const count = this.pendingDeliveries.get(uid)?.length || 0;
+    if (count === 0 || this.pendingDeliveryNotified.has(uid)) return;
+    this.pendingDeliveryNotified.add(uid);
+    await this.ilink.sendText(uid, `有 ${count} 条未送达缓存。\n/pending send 补发\n/pending clear 丢弃\n/pending list 查看摘要`);
+  }
+
+  private pendingDeliverySummary(uid: string): string {
+    const list = this.pendingDeliveries.get(uid) || [];
+    if (list.length === 0) return '无未送达缓存';
+    return list.map((item, i) => {
+      const oneLine = item.replace(/\s+/g, ' ').trim();
+      return `${i + 1}. ${oneLine.substring(0, 120)}${oneLine.length > 120 ? '...' : ''}`;
+    }).join('\n');
   }
 
   private async sendTextOrQueue(uid: string, text: string): Promise<boolean> {
@@ -448,7 +474,6 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
     const uid = msg.from_user_id;
 
     const trimmed = text.trim();
-    await this.flushPendingDeliveries(uid);
 
     // Build media context for CLI
     let mediaContext = '';
@@ -466,6 +491,8 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
       await this.handleSlash(uid, trimmed);
       return;
     }
+
+    await this.notifyPendingDeliveries(uid);
 
     // ── Parse: @tool1>tool2 chain, @tool single, >> relay, plain text ──
 
@@ -609,6 +636,7 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
           '/cancel  取消任务',
           '/fork  分支当前会话',
           '/resume  查看保存的会话',
+          '/pending list|send|clear  管理未送达缓存',
           '',
           '— 快捷 —',
           '/yolo  auto+effort max',
@@ -629,6 +657,31 @@ const noTrailingSlash = unquoted.replace(/\/+$/, '');
       case 'remote':
       case 'local':
         return this.handleConfigCommand(uid, cmd, arg, reply);
+
+      case 'pending':
+      case 'delivery': {
+        const op = arg.split(/\s+/)[0]?.toLowerCase() || 'list';
+        if (op === 'list' || op === 'show') {
+          await reply(this.pendingDeliverySummary(uid));
+          return true;
+        }
+        if (op === 'send' || op === 'flush') {
+          const count = this.pendingDeliveries.get(uid)?.length || 0;
+          if (count === 0) {
+            await reply('无未送达缓存');
+            return true;
+          }
+          await this.flushPendingDeliveries(uid);
+          return true;
+        }
+        if (op === 'clear' || op === 'drop' || op === 'discard') {
+          const count = this.clearPendingDeliveries(uid);
+          await reply(`已丢弃 ${count} 条未送达缓存`);
+          return true;
+        }
+        await reply('/pending list\n/pending send\n/pending clear');
+        return true;
+      }
 
       case 'status': case 'st': {
         const def = settings.defaultTool || this.config.defaultTool;

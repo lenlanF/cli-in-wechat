@@ -347,7 +347,7 @@ test('exec maps stale default-alias model to empty before adapter execution', as
   assert.equal((sessions.get('u1') as any).model, '');
 });
 
-test('sendTextOrQueue stores failed final delivery and flushes on next user message', async () => {
+test('sendTextOrQueue stores failed final delivery and notifies on next user message', async () => {
   const { router, messages } = createRouter();
   let failNext = true;
   router.ilink.sendText = async (uid: string, text: string) => {
@@ -365,5 +365,24 @@ test('sendTextOrQueue stores failed final delivery and flushes on next user mess
   await router.handle(makeMessage('u1'), 'next message', '');
 
   assert.equal(messages[0].uid, 'u1');
+  assert.ok(messages[0].text.includes('未送达缓存'));
+});
+
+test('handleSlash /pending send flushes queued delivery explicitly', async () => {
+  const { router, messages } = createRouter();
+  router.queuePendingDelivery('u1', 'final result');
+
+  await router.handleSlash('u1', '/pending send');
+
   assert.equal(messages[0].text, '[补发]\nfinal result');
+});
+
+test('handleSlash /pending clear discards queued deliveries', async () => {
+  const { router, messages } = createRouter();
+  router.queuePendingDelivery('u1', 'obsolete result');
+
+  await router.handleSlash('u1', '/pending clear');
+
+  assert.equal(messages[0].text, '已丢弃 1 条未送达缓存');
+  assert.equal(router.pendingDeliverySummary('u1'), '无未送达缓存');
 });
