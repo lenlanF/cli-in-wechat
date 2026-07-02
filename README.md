@@ -296,6 +296,16 @@ Linux/macOS 可先挂载 NAS，再填写挂载目录：
 [SEND_FILE: D:\tmp\result.png]
 ```
 
+### 主动发送限制
+
+截至公开可见的 ClawBot/iLink API 版本，Bot 发送消息需要已有用户会话的 `context_token`。这意味着：
+
+- 用户必须先给某个 ClawBot 发过至少一条消息，桥接服务才能保存该用户的 `context_token`。
+- `wcli send` 或桥接服务后续可以基于已保存的 `context_token` 给这个用户继续发送。
+- 目前没有公开接口支持 Bot 对一个从未互动过的用户/会话主动创建新对话。
+
+因此本项目支持的是“对已建立会话的主动发送/延迟发送”，不是“凭空新建微信对话”。多 ClawBot profile 会分别保存各自的 context token。
+
 ## 常用命令
 
 | 命令 | 作用 |

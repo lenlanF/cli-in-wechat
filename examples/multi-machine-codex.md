@@ -14,6 +14,12 @@
 
 不建议 A 和 B 同时登录同一个 ClawBot 入口，否则可能重复消费消息或造成会话上下文混乱。
 
+## 主动发送限制
+
+ClawBot/iLink 当前公开接口发送消息需要 `context_token`。所以机器 B 上的 `cli-in-wechat` 只能对已经给该 ClawBot 发过消息的用户继续发送，不能直接对从未互动过的用户主动创建新对话。
+
+多 ClawBot profile 会分别保存自己的 `context_token`，因此每个 ClawBot 至少需要目标用户先发一条消息给它。
+
 ## 机器 A: Linux Codex HTTP Agent
 
 机器 A 需要已经安装并登录好 Codex CLI。

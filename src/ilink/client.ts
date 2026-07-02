@@ -3,7 +3,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { generateWechatUin, encryptAesEcb, aesEcbPaddedSize, encodeMessageAesKey, md5 } from '../utils/crypto.js';
 import { log } from '../utils/logger.js';
-import { savePollCursor, loadPollCursor, saveContextTokens } from '../config.js';
+import { savePollCursor, loadPollCursor, saveContextTokens, loadContextTokens } from '../config.js';
 import type { BridgeConfig } from '../config.js';
 import { downloadImage, downloadFile, downloadVideo, type DownloadedMedia } from '../utils/media.js';
 import { archiveMediaToNas } from '../utils/nas.js';
@@ -61,6 +61,7 @@ export class ILinkClient {
     this.credentials = credentials;
     this.botName = botName;
     this.pollCursor = loadPollCursor(botName);
+    this.contextTokens = loadContextTokens(botName);
     this.config = config;
   }
 
